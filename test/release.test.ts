@@ -20,7 +20,7 @@ test("release guard accepts only canonical repository and matching stable versio
 });
 
 test("release guard rejects ordinary branch pushes, mismatched tags, and forks", () => {
-  for (const tag of ["main", "v999.0.0", "v0.2.0-beta.1", ""]) {
+  for (const tag of ["main", "v999.0.0", `v${pkg.version}-beta.1`, ""]) {
     const result = verify("DoWhileGeek/pi-flexy", tag);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Release tag must match/);

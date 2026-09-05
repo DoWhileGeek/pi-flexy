@@ -21,21 +21,21 @@ Pi supplies its core libraries at runtime. They are optional wildcard peers, not
 
 npm requires a package to exist before you can configure its trusted publisher. The first release therefore uses your interactive npm authentication, not GitHub OIDC.
 
-The commands below use npm 11.15.0 without changing your globally installed npm:
+Use ordinary npm for login and the first publication. npm 11.15.0+ is only needed for the optional `npm trust` CLI setup below, not these login commands:
 
 ```bash
 npm ci --ignore-scripts
-npx --yes npm@11.15.0 login
-npx --yes npm@11.15.0 whoami
+npm login
+npm whoami
 ```
 
 Confirm the returned identity owns or can publish to the `dowhilegeek` scope. Review the release before running the next command: **npm publication makes this version public, and published versions cannot be overwritten.**
 
 ```bash
-npx --yes npm@11.15.0 publish --access public
+npm publish --access public
 ```
 
-`prepublishOnly` runs typechecking, all tests, and the tarball check before publication. The initial prepared version is `0.2.0`; check the current version rather than assuming it remains unchanged.
+`prepublishOnly` runs typechecking, all tests, and the tarball check before publication. The initial prepared version is `0.1.0`; check the current version rather than assuming it remains unchanged.
 
 Verify the registry result:
 
