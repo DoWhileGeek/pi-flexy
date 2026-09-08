@@ -1,6 +1,6 @@
 {
   "name": "@dowhilegeek/pi-flexy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Session-scoped OpenAI Flex controls for Pi, with transport-level request audits.",
   "type": "module",
   "license": "MIT",
