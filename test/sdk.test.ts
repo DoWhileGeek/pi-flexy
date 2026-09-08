@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { AUDIT_ENTRY, decodeAudit, verdict } from "../src/audit.ts";
 
-test("real Pi loader + agent session + reload: commands stay local, audits and savings survive", async (t) => {
+test("real Pi loader + startup flag + agent session + reload: commands stay local, audits and savings survive", async (t) => {
   const logs: string[] = [];
   t.mock.method(console, "log", (value: unknown) => { logs.push(String(value)); });
   const dir = await mkdtemp(join(tmpdir(), "flexy-sdk-"));
@@ -43,6 +43,15 @@ test("real Pi loader + agent session + reload: commands stay local, audits and s
       systemPrompt: "Reply briefly.",
     });
     await resourceLoader.reload();
+    const loadedExtensions = resourceLoader.getExtensions();
+    assert.deepEqual(loadedExtensions.extensions[0]?.flags.get("flex"), {
+      name: "flex",
+      description: "Start with OpenAI Flex enabled",
+      type: "boolean",
+      default: false,
+      extensionPath: loadedExtensions.extensions[0]?.path,
+    });
+    loadedExtensions.runtime.flagValues.set("flex", true);
     const sessionManager = SessionManager.inMemory(dir);
     const { session, extensionsResult } = await createAgentSession({ cwd: dir, agentDir: dir, model, modelRuntime, resourceLoader, sessionManager, settingsManager, noTools: "all", thinkingLevel: "off" });
     dispose = () => session.dispose();
@@ -50,8 +59,8 @@ test("real Pi loader + agent session + reload: commands stay local, audits and s
     assert.equal(extensionsResult.extensions.length, 1);
     const errors: string[] = [];
     await session.bindExtensions({ onError: error => errors.push(error.error) });
-    await session.prompt("/flex on");
-    assert.equal(tiers.length, 0, "slash commands must not make model requests");
+    assert.equal(tiers.length, 0, "startup flag must not make model requests");
+    assert.match(logs.at(-1)!, /Flex: ON/);
     await session.prompt("Ping");
     assert.deepEqual(tiers, ["flex"], JSON.stringify(session.messages.filter(m => m.role === "assistant")));
     let audits = sessionManager.getBranch().filter(e => e.type === "custom" && e.customType === AUDIT_ENTRY).map(e => decodeAudit((e as { data: unknown }).data)!);

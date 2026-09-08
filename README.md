@@ -16,7 +16,13 @@ Requires Node ≥22.19, Pi ≥0.84.4 and <0.85.0, and an OpenAI API key. ChatGPT
 
 In Pi, use `/login` to add your OpenAI API key, then `/model` to select a [Flex-supported model](https://developers.openai.com/api/docs/guides/flex-processing) under `openai`.
 
-Run `/flex on`, send a prompt, then `/flex audit` after the reply.
+Start Pi with Flex enabled before first prompt:
+
+```bash
+pi --flex
+```
+
+Or run `/flex on` in an existing session. Send a prompt, then run `/flex audit` after the reply.
 
 | Command | What it does |
 | --- | --- |
@@ -29,7 +35,9 @@ Run `/flex on`, send a prompt, then `/flex audit` after the reply.
 | `/flex history` | Show recent calls |
 | `/flex help` | Show all options |
 
-The footer shows `💪 flex:on` or `💪 flex:off`. New sessions start with Flex off.
+The footer shows `💪 flex:on` or `💪 flex:off`. New sessions start with Flex off unless launched with `--flex`.
+
+Both `--flex` and `/flex on` affect only models using Pi's native `openai` provider and `openai-responses` API. With Codex subscriptions or other providers, Flexy shows `flex:on (inactive)` and leaves requests untouched.
 
 Flex can be slower or unavailable. Flexy won't silently switch to standard pricing; use `/flex off` if you want to retry without Flex. Savings are estimates, not billing records.
 

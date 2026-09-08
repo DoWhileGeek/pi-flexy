@@ -23,7 +23,8 @@ const HELP = [
   "Flexy — OpenAI Flex controls",
   ...COMMANDS.map(c => `/flex ${c.value.padEnd(9)} ${c.description}`),
   "/flex              Same as /flex status",
-  "Mode defaults off; stored in this session branch, not global config.",
+  "pi --flex          Start a session with Flex on before the first prompt",
+  "Mode defaults off unless --flex is passed; stored in this session branch, not global config.",
   "On requests flex; off requests default. No silent standard-tier fallback.",
   "Applies only to openai / openai-responses. Codex subscriptions and other APIs are untouched.",
   "Audit observes serialized HTTP bodies and final response service_tier; never infers delivery from the toggle.",
@@ -36,6 +37,12 @@ function show(ctx: ExtensionContext, text: string, level: "info" | "warning" | "
 }
 
 export default function flexy(pi: ExtensionAPI): void {
+  pi.registerFlag("flex", {
+    description: "Start with OpenAI Flex enabled",
+    type: "boolean",
+    default: false,
+  });
+
   let active = true;
   let uiContext: ExtensionContext | undefined;
   const store = new AuditStore((type, data) => { if (active) pi.appendEntry(type, data); });
@@ -114,7 +121,14 @@ export default function flexy(pi: ExtensionAPI): void {
     updateStatus(ctx);
   });
 
-  pi.on("session_start", (_event, ctx) => restore(ctx));
+  pi.on("session_start", (_event, ctx) => {
+    restore(ctx);
+    if (pi.getFlag("flex") === true) {
+      if (store.mode !== "on") store.setMode("on");
+      updateStatus(ctx);
+      show(ctx, status(ctx), managed(ctx.model) ? "info" : "warning");
+    }
+  });
   pi.on("session_tree", (_event, ctx) => restore(ctx));
   pi.on("model_select", (_event, ctx) => updateStatus(ctx));
   pi.on("session_shutdown", (_event, ctx) => {

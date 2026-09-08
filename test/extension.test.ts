@@ -13,21 +13,30 @@ const baseModel: Model<"openai-responses"> = {
   baseUrl: "http://127.0.0.1/v1", reasoning: false, input: ["text"],
   cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 256,
 };
-function harness() {
+function harness(options: { flex?: boolean } = {}) {
   let entries: Entry[] = [];
   const notices: string[] = [];
+  const noticeLevels: Array<string | undefined> = [];
   const statuses = new Map<string, string | undefined>();
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Command>();
+  const flags = new Map<string, { description?: string; type: "boolean" | "string"; default?: boolean | string }>();
+  const flagValues = new Map<string, boolean | string>();
+  if (options.flex !== undefined) flagValues.set("flex", options.flex);
   let provider: ProviderConfig | undefined;
   const ctx = {
     model: { ...baseModel }, hasUI: true,
-    ui: { notify: (text: string) => notices.push(text), setStatus: (key: string, value: string | undefined) => statuses.set(key, value) },
+    ui: { notify: (text: string, level?: string) => { notices.push(text); noticeLevels.push(level); }, setStatus: (key: string, value: string | undefined) => statuses.set(key, value) },
     sessionManager: { getBranch: () => entries },
   } as unknown as ExtensionCommandContext;
   const api = {
     on: (name: string, handler: Handler) => handlers.set(name, handler),
     registerCommand: (name: string, command: Command) => commands.set(name, command),
+    registerFlag: (name: string, flag: { description?: string; type: "boolean" | "string"; default?: boolean | string }) => {
+      flags.set(name, flag);
+      if (!flagValues.has(name) && flag.default !== undefined) flagValues.set(name, flag.default);
+    },
+    getFlag: (name: string) => flagValues.get(name),
     registerProvider: (name: string, config: ProviderConfig) => { assert.equal(name, "openai"); provider = config; },
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) }),
   } as unknown as ExtensionAPI;
@@ -52,7 +61,7 @@ function harness() {
     entries.push({ type: "message", message });
     return { message, events };
   };
-  return { ctx, commands, command, emit, notices, statuses, run, lastAudit,
+  return { ctx, commands, flags, command, emit, notices, noticeLevels, statuses, run, lastAudit,
     get entries() { return entries; }, replaceBranch: (next: Entry[]) => { entries = next; } };
 }
 
@@ -111,6 +120,32 @@ test("commands, autocomplete, invalid args, branch restoration, instance isolati
   await h.command("on");
   await second.command("status");
   assert.match(second.notices.at(-1)!, /OFF/);
+});
+
+test("CLI --flex enables before first managed call and stays inactive for other providers", async () => {
+  const h = harness({ flex: true });
+  assert.deepEqual(h.flags.get("flex"), {
+    description: "Start with OpenAI Flex enabled",
+    type: "boolean",
+    default: false,
+  });
+  await h.emit("session_start");
+  assert.equal(h.statuses.get("flexy"), "💪 flex:on");
+  assert.match(h.notices.at(-1)!, /Flex: ON/);
+  assert.equal(h.noticeLevels.at(-1), "info");
+  await h.run({ fetch: mockFetch() });
+  assert.equal(h.lastAudit().mode, "on");
+  assert.equal(verdict(h.lastAudit()).sentAsFlex, "YES");
+
+  const inactive = harness({ flex: true });
+  inactive.ctx.model = { ...baseModel, provider: "openai-codex", api: "openai-codex-responses" };
+  await inactive.emit("session_start");
+  assert.equal(inactive.statuses.get("flexy"), "💪 flex:on (inactive)");
+  assert.equal(inactive.noticeLevels.at(-1), "warning");
+  assert.match(inactive.notices.at(-1)!, /Codex subscription/);
+  const payload = { model: "gpt-5.4" };
+  assert.equal(await inactive.emit("before_provider_request", { payload }), payload);
+  assert.equal("service_tier" in payload, false);
 });
 
 test("native SDK hits local HTTP server: on/off wire tiers, request ID, no stream regression", async () => {
