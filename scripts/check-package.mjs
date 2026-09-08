@@ -27,7 +27,7 @@ const output = process.env.npm_execpath
 const [packed] = JSON.parse(output);
 const allowed = [
   "LICENSE", "README.md", "package.json", "extensions/flex.ts",
-  "src/audit.ts", "src/pricing.ts", "src/savings.ts", "src/transport.ts",
+  "src/audit.ts", "src/pricing.ts", "src/retry.ts", "src/savings.ts", "src/transport.ts",
 ];
 assert.deepEqual(packed.files.map(file => file.path).sort(), allowed.sort(), "Unexpected or missing npm files; review before releasing");
 assert.equal(packed.name, pkg.name);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { decodePricing, decodeUsage, type PricingSnapshot, type UsageSnapshot } from "./pricing.ts";
+import { DEFAULT_FLEX_RETRIES, parseFlexRetries, type FlexRetryTerminalReason } from "./retry.ts";
 
 export const STATE_ENTRY = "flexy:state";
 export const AUDIT_ENTRY = "flexy:audit";
@@ -22,6 +23,11 @@ export interface Attempt {
   networkError?: boolean;
   inspectionLimited?: boolean;
 }
+export interface FlexRetrySummary {
+  limit: number;
+  performed: number;
+  terminalReason?: FlexRetryTerminalReason;
+}
 export interface Audit {
   version: 1;
   id: string;
@@ -35,6 +41,7 @@ export interface Audit {
   outcome: Outcome;
   attemptCount: number;
   attempts: Attempt[];
+  flexRetry?: FlexRetrySummary;
   // Undefined is a pre-savings audit; null means pricing was unavailable for a new call.
   pricing?: PricingSnapshot | null;
   usage?: UsageSnapshot;
@@ -101,6 +108,14 @@ export function decodeAudit(data: unknown): Audit | undefined {
       inspectionLimited: raw.inspectionLimited === true,
     });
   }
+  let flexRetry: FlexRetrySummary | undefined;
+  if (isRecord(data.flexRetry)) {
+    const limit = parseFlexRetries(data.flexRetry.limit);
+    const performed = parseFlexRetries(data.flexRetry.performed);
+    const terminalReason = ["success", "budget-exhausted", "partial-output", "pass-through", "aborted", "internal-error"]
+      .includes(String(data.flexRetry.terminalReason)) ? data.flexRetry.terminalReason as FlexRetryTerminalReason : undefined;
+    if (limit !== undefined && performed !== undefined && performed <= limit) flexRetry = { limit, performed, terminalReason };
+  }
   return {
     version: 1, id: data.id as string, startedAt: data.startedAt,
     finishedAt: typeof data.finishedAt === "string" && Number.isFinite(Date.parse(data.finishedAt)) ? data.finishedAt : undefined,
@@ -108,7 +123,7 @@ export function decodeAudit(data: unknown): Audit | undefined {
     model: identity(data.model as unknown as ModelIdentity), mode: data.mode,
     coverage: data.coverage as Audit["coverage"], outcome: data.outcome as Outcome,
     payloadTier: data.payloadTier === undefined ? undefined : savedTier(data.payloadTier),
-    attemptCount: data.attemptCount, attempts,
+    attemptCount: data.attemptCount, attempts, flexRetry,
     pricing: data.pricing === undefined ? undefined : decodePricing(data.pricing) ?? null,
     usage: decodeUsage(data.usage),
   };
@@ -116,6 +131,7 @@ export function decodeAudit(data: unknown): Audit | undefined {
 
 export class AuditStore {
   mode: Mode = "off";
+  retries = DEFAULT_FLEX_RETRIES;
   records: Audit[] = [];
   constructor(private readonly save: (type: string, data: unknown) => void) {}
   get last(): Audit | undefined { return this.records.at(-1); }
@@ -123,9 +139,18 @@ export class AuditStore {
   persist(audit: Audit): void {
     if (this.contains(audit)) this.save(AUDIT_ENTRY, structuredClone(audit));
   }
+  private saveState(): void {
+    this.save(STATE_ENTRY, { version: 1, mode: this.mode, retries: this.retries });
+  }
   setMode(mode: Mode): void {
     this.mode = mode;
-    this.save(STATE_ENTRY, { version: 1, mode });
+    this.saveState();
+  }
+  setRetries(retries: number): void {
+    const parsed = parseFlexRetries(retries);
+    if (parsed === undefined) throw new Error(`Flex retries must be an integer from 0 to 10: ${String(retries)}`);
+    this.retries = parsed;
+    this.saveState();
   }
   begin(model: ModelIdentity, coverage: Audit["coverage"], timestamp = Date.now()): Audit {
     const audit: Audit = {
@@ -147,11 +172,15 @@ export class AuditStore {
   }
   restore(entries: readonly Entry[]): void {
     this.mode = "off";
+    this.retries = DEFAULT_FLEX_RETRIES;
     const records = new Map<string, Audit>();
     let lastAssistant: Record<string, unknown> | undefined;
     for (const entry of entries) {
-      if (entry.type === "custom" && entry.customType === STATE_ENTRY && isRecord(entry.data) && entry.data.version === 1 &&
-          (entry.data.mode === "on" || entry.data.mode === "off")) this.mode = entry.data.mode;
+      if (entry.type === "custom" && entry.customType === STATE_ENTRY && isRecord(entry.data) && entry.data.version === 1) {
+        if (entry.data.mode === "on" || entry.data.mode === "off") this.mode = entry.data.mode;
+        const retries = parseFlexRetries(entry.data.retries);
+        if (retries !== undefined) this.retries = retries;
+      }
       if (entry.type === "custom" && entry.customType === AUDIT_ENTRY) {
         const audit = decodeAudit(entry.data);
         if (audit) records.set(audit.id, audit);
@@ -206,6 +235,10 @@ export function formatAudit(audit: Audit | undefined): string {
   if (!managed(audit.model)) lines.push(scopeReason(audit.model));
   if (audit.coverage === "payload-only") lines.push("Hook-only evidence: later payload handlers may have changed this tier; no transport proof.");
   if (result.mismatch) lines.push("MISMATCH: observed tier differs from selected mode. Check other provider/payload extensions.");
+  if (audit.flexRetry) {
+    const terminal = audit.flexRetry.terminalReason ? ` | terminal: ${audit.flexRetry.terminalReason}` : "";
+    lines.push(`Flex stream retries: ${audit.flexRetry.performed}/${audit.flexRetry.limit}${terminal}`);
+  }
   for (const attempt of audit.attempts) {
     lines.push(`Attempt ${attempt.number}: sent=${attempt.sentTier}, HTTP=${attempt.status ?? "not received"}, response=${attempt.responseTier ?? "not reported"}${attempt.networkError ? ", transport error" : ""}`);
     if (attempt.origin) lines.push(`  Origin: ${attempt.origin}`);

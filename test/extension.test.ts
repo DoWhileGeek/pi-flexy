@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { test } from "node:test";
-import type { Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ProviderConfig, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import flexy from "../extensions/flex.ts";
 import { AUDIT_ENTRY, decodeAudit, type Entry, isRecord, verdict } from "../src/audit.ts";
@@ -13,7 +13,7 @@ const baseModel: Model<"openai-responses"> = {
   baseUrl: "http://127.0.0.1/v1", reasoning: false, input: ["text"],
   cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 256,
 };
-function harness(options: { flex?: boolean } = {}) {
+function harness(options: { flex?: boolean; flexRetries?: string } = {}) {
   let entries: Entry[] = [];
   const notices: string[] = [];
   const noticeLevels: Array<string | undefined> = [];
@@ -23,6 +23,7 @@ function harness(options: { flex?: boolean } = {}) {
   const flags = new Map<string, { description?: string; type: "boolean" | "string"; default?: boolean | string }>();
   const flagValues = new Map<string, boolean | string>();
   if (options.flex !== undefined) flagValues.set("flex", options.flex);
+  if (options.flexRetries !== undefined) flagValues.set("flex-retries", options.flexRetries);
   let provider: ProviderConfig | undefined;
   const ctx = {
     model: { ...baseModel }, hasUI: true,
@@ -80,6 +81,14 @@ function sse(tier: string | undefined = "flex"): string {
 function mockFetch(tier: string | undefined = "flex"): typeof fetch {
   return async () => new Response(sse(tier), { headers: { "content-type": "text/event-stream", "x-request-id": "req_test" } });
 }
+function failedSse(): string {
+  const response = {
+    id: "resp_failed", object: "response", status: "failed", service_tier: "flex", output: [],
+    error: { code: "server_error", message: "We're currently processing too many requests — please try again later." },
+    usage: null,
+  };
+  return `event: response.failed\ndata: ${JSON.stringify({ type: "response.failed", response })}\n\n`;
+}
 async function listen(server: Server): Promise<string> {
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -98,12 +107,17 @@ test("commands, autocomplete, invalid args, branch restoration, instance isolati
   assert.match(h.notices.at(-1)!, /OFF/);
   await h.command("ON");
   assert.equal(h.statuses.get("flexy"), "💪 flex:on");
+  await h.command("retries 5");
+  assert.match(h.notices.at(-1)!, /5 after initial/);
+  assert.equal((await h.commands.get("flex")!.getArgumentCompletions!("retries 1"))?.[0]?.value, "retries 1");
   const branch = structuredClone(h.entries);
   await h.command("toggle");
   assert.equal(h.statuses.get("flexy"), "💪 flex:off");
   await h.command("on extra");
   assert.match(h.notices.at(-1)!, /Invalid/);
   await h.command("history 51");
+  assert.match(h.notices.at(-1)!, /Invalid/);
+  await h.command("retries 11");
   assert.match(h.notices.at(-1)!, /Invalid/);
   await h.command("audit");
   assert.match(h.notices.at(-1)!, /no AI call/);
@@ -112,9 +126,13 @@ test("commands, autocomplete, invalid args, branch restoration, instance isolati
   h.replaceBranch(branch);
   await h.emit("session_tree");
   assert.equal(h.statuses.get("flexy"), "💪 flex:on");
+  await h.command("retries");
+  assert.match(h.notices.at(-1)!, /5 after initial/);
   h.replaceBranch([]);
   await h.emit("session_tree");
   assert.equal(h.statuses.get("flexy"), "💪 flex:off");
+  await h.command("retries");
+  assert.match(h.notices.at(-1)!, /2 after initial/);
   const second = harness();
   await second.emit("session_start");
   await h.command("on");
@@ -122,20 +140,31 @@ test("commands, autocomplete, invalid args, branch restoration, instance isolati
   assert.match(second.notices.at(-1)!, /OFF/);
 });
 
-test("CLI --flex enables before first managed call and stays inactive for other providers", async () => {
-  const h = harness({ flex: true });
+test("CLI flags enable Flex and configure retries before first managed call", async () => {
+  const h = harness({ flex: true, flexRetries: "3" });
   assert.deepEqual(h.flags.get("flex"), {
     description: "Start with OpenAI Flex enabled",
     type: "boolean",
     default: false,
   });
+  assert.deepEqual(h.flags.get("flex-retries"), {
+    description: "Flex stream retries after the initial attempt (0-10)",
+    type: "string",
+  });
   await h.emit("session_start");
   assert.equal(h.statuses.get("flexy"), "💪 flex:on");
   assert.match(h.notices.at(-1)!, /Flex: ON/);
+  assert.match(h.notices.at(-1)!, /Flex retries: 3/);
   assert.equal(h.noticeLevels.at(-1), "info");
   await h.run({ fetch: mockFetch() });
   assert.equal(h.lastAudit().mode, "on");
   assert.equal(verdict(h.lastAudit()).sentAsFlex, "YES");
+
+  const invalid = harness({ flexRetries: "99" });
+  await invalid.emit("session_start");
+  assert.match(invalid.notices.at(-1)!, /Invalid --flex-retries/);
+  await invalid.command("retries");
+  assert.match(invalid.notices.at(-1)!, /2 after initial/);
 
   const inactive = harness({ flex: true });
   inactive.ctx.model = { ...baseModel, provider: "openai-codex", api: "openai-codex-responses" };
@@ -204,7 +233,84 @@ test("later payload mutation is audited as sent, not as selected", async () => {
   assert.ok(h.notices.some(n => n.includes("mismatch detected")));
 });
 
-test("native retries remain Flex; no invisible fallback; records every HTTP attempt", async () => {
+test("Flex retry policy stays inactive for standard mode and later payload removal", async () => {
+  const standard = harness();
+  await standard.emit("session_start");
+  let standardRequests = 0;
+  const standardResult = await standard.run({ fetch: async () => {
+    standardRequests++;
+    return new Response(failedSse(), { headers: { "content-type": "text/event-stream" } });
+  } });
+  assert.equal(standardRequests, 1);
+  assert.match(standardResult.message.errorMessage!, /too many requests/i);
+  assert.equal(standard.lastAudit().flexRetry, undefined);
+
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 0");
+  const result = await h.run({
+    fetch: async () => new Response(failedSse(), { headers: { "content-type": "text/event-stream" } }),
+    onPayload: payload => ({ ...(payload as object), service_tier: "default" }),
+  });
+  assert.equal(result.message.stopReason, "error");
+  assert.match(result.message.errorMessage!, /too many requests/i, "non-Flex failure must pass through unchanged");
+  assert.deepEqual(h.lastAudit().flexRetry, { limit: 0, performed: 0, terminalReason: "pass-through" });
+  assert.equal(h.lastAudit().attempts[0]?.sentTier, "default");
+});
+
+test("Flex stream capacity retry freezes payload and hides failed attempt from Pi", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 1");
+  let requests = 0;
+  let payloadHooks = 0;
+  const bodies: string[] = [];
+  const fetch: typeof globalThis.fetch = async (_input, init) => {
+    requests++;
+    bodies.push(String(init?.body));
+    return requests === 1
+      ? new Response(failedSse(), { headers: { "content-type": "text/event-stream", "x-request-id": "req_failed" } })
+      : mockFetch()(_input, init);
+  };
+  const result = await h.run({
+    fetch,
+    onPayload: payload => { payloadHooks++; return { ...(payload as object), stable_marker: "same" }; },
+  });
+  assert.equal(result.message.stopReason, "stop", result.message.errorMessage);
+  assert.equal(requests, 2);
+  assert.equal(payloadHooks, 1, "post-hook payload must be frozen across internal retries");
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(result.events.filter(event => event === "start").length, 1);
+  assert.equal(result.events.includes("error"), false);
+  assert.deepEqual(h.lastAudit().flexRetry, { limit: 1, performed: 1, terminalReason: "success" });
+  assert.deepEqual(h.lastAudit().attempts.map(a => [a.sentTier, a.status]), [["flex", 200], ["flex", 200]]);
+  assert.equal(verdict(h.lastAudit()).servedAsFlex, "YES");
+  assert.equal(h.statuses.get("flexy"), "💪 flex:on");
+});
+
+test("Flex retry exhaustion is final for Pi and never falls back to default", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 0");
+  let requests = 0;
+  const result = await h.run({ fetch: async (_input, init) => {
+    requests++;
+    assert.equal(JSON.parse(String(init?.body)).service_tier, "flex");
+    return new Response(failedSse(), { headers: { "content-type": "text/event-stream" } });
+  } });
+  assert.equal(requests, 1);
+  assert.equal(result.message.stopReason, "error");
+  assert.match(result.message.errorMessage!, /1 total stream attempt/);
+  assert.equal(isRetryableAssistantError(result.message), false);
+  assert.deepEqual(h.lastAudit().flexRetry, { limit: 0, performed: 0, terminalReason: "budget-exhausted" });
+  await h.command("audit");
+  assert.match(h.notices.at(-1)!, /terminal: budget-exhausted/);
+});
+
+test("native HTTP retries remain Flex; no invisible fallback; records every HTTP attempt", async () => {
   const h = harness();
   await h.emit("session_start");
   await h.command("on");

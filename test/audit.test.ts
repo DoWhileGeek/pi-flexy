@@ -11,17 +11,26 @@ function fixture() {
   return { store, entries };
 }
 
-test("default off; versioned session mode restores independently", () => {
+test("default mode/retries and versioned branch state restore independently", () => {
   const { store, entries } = fixture();
   assert.equal(store.mode, "off");
+  assert.equal(store.retries, 2);
   store.setMode("on");
-  assert.deepEqual(entries[0], { type: "custom", customType: STATE_ENTRY, data: { version: 1, mode: "on" } });
+  store.setRetries(5);
+  assert.deepEqual(entries[0], { type: "custom", customType: STATE_ENTRY, data: { version: 1, mode: "on", retries: 2 } });
+  assert.deepEqual(entries[1], { type: "custom", customType: STATE_ENTRY, data: { version: 1, mode: "on", retries: 5 } });
   const second = fixture().store;
   second.restore(entries);
   assert.equal(second.mode, "on");
+  assert.equal(second.retries, 5);
+  second.restore([{ type: "custom", customType: STATE_ENTRY, data: { version: 1, mode: "on" } }]);
+  assert.equal(second.mode, "on", "pre-retry state remains compatible");
+  assert.equal(second.retries, 2);
   second.restore([]);
   assert.equal(second.mode, "off");
+  assert.equal(second.retries, 2);
   assert.equal(store.mode, "on");
+  assert.throws(() => store.setRetries(11), /0 to 10/);
 });
 
 test("provider + API scope excludes subscriptions and compatible proxies under other providers", () => {
@@ -135,14 +144,26 @@ test("newer unobserved assistant replaces older audit; matching assistant does n
 test("malformed persisted entries ignored; extra data stripped; history bounded", () => {
   const { store } = fixture();
   store.restore([
-    { type: "custom", customType: STATE_ENTRY, data: { version: 2, mode: "on" } },
+    { type: "custom", customType: STATE_ENTRY, data: { version: 2, mode: "on", retries: 5 } },
+    { type: "custom", customType: STATE_ENTRY, data: { version: 1, mode: "off", retries: 99 } },
     { type: "custom", customType: AUDIT_ENTRY, data: { version: 1, attempts: "bad" } },
   ]);
   assert.equal(store.mode, "off");
+  assert.equal(store.retries, 2);
   assert.equal(store.last, undefined);
   for (let i = 0; i < 55; i++) store.begin(model, "transport");
   assert.equal(store.records.length, 50);
   const decoded = decodeAudit({ ...store.records.at(-1), prompt: "secret", auth: "secret", model: { ...model, key: "secret" } });
   assert.ok(decoded);
   assert.equal(JSON.stringify(decoded).includes("secret"), false);
+});
+
+test("Flex retry audit metadata decodes safely and formats exhaustion", () => {
+  const { store } = fixture();
+  const call = store.begin(model, "transport");
+  call.flexRetry = { limit: 2, performed: 2, terminalReason: "budget-exhausted" };
+  const decoded = decodeAudit(call);
+  assert.deepEqual(decoded?.flexRetry, call.flexRetry);
+  assert.match(formatAudit(call), /Flex stream retries: 2\/2 \| terminal: budget-exhausted/);
+  assert.equal(decodeAudit({ ...call, flexRetry: { limit: 2, performed: 9, terminalReason: "secret" } })?.flexRetry, undefined);
 });
