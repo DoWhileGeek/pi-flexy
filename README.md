@@ -1,49 +1,32 @@
 # Flexy
 
-Session-scoped OpenAI Flex controls for [Pi](https://pi.dev), with transport-level audits.
-
-```text
-/flex on
-# Send a prompt using Pi's openai provider.
-/flex audit
-```
+Turn OpenAI Flex on or off inside [Pi](https://pi.dev), audit the last call's processing tier, and see estimated savings.
 
 **Toggle intent is not delivery evidence.** Flexy records the serialized HTTP request body and observes the response's `service_tier`. Audit distinguishes **sent as Flex**, **served as Flex**, and **unknown**.
 
-## Try locally
+## Install
 
-Requires Node ≥22.19 and Pi ≥0.84.4, <0.85.0. Tested with Pi 0.84.4; uses Pi's current `@earendil-works` packages, not the older `@mariozechner` extension API.
+Requires Node ≥22.19 and Pi ≥0.84.4, <0.85.0. Tested with Pi 0.84.4; uses Pi's `@earendil-works` packages, not the older `@mariozechner` extension API. Check your Pi version with `pi --version`.
 
-From this checkout:
-
-```bash
-npm ci --ignore-scripts
-pi -e ./extensions/flex.ts
-```
-
-Or register this directory as a local Pi package:
-
-```bash
-pi install /absolute/path/to/flexy
-```
-
-Then restart Pi or run `/reload`. Don't load the same extension through both mechanisms. Disable other extensions registering `/flex` before loading Flexy.
-
-Select an **OpenAI API** model using `/model`, with OpenAI API credentials configured through Pi. `openai-codex` is a separate subscription provider; Flexy does not change it.
-
-Public source: [DoWhileGeek/pi-flexy](https://github.com/DoWhileGeek/pi-flexy). Install directly from GitHub:
-
-```bash
-pi install git:github.com/DoWhileGeek/pi-flexy
-```
-
-npm package name: `@dowhilegeek/pi-flexy`. Once the first npm release is published:
+Run this in your terminal:
 
 ```bash
 pi install npm:@dowhilegeek/pi-flexy
 ```
 
-Use one installation source at a time to avoid duplicate `/flex` commands. The `pi-package` keyword makes the npm package discoverable in [Pi's package gallery](https://pi.dev/packages); repository creation alone does not publish it.
+This installs the published package through Pi's package manager. You don't need to clone the repository or find it in [Pi's package gallery](https://pi.dev/packages): installation fetches the package directly from npm.
+
+Start Pi, or run `/reload` inside an existing Pi session. Use one installation source at a time, and disable other extensions registering `/flex` to avoid duplicate commands.
+
+## Quick start
+
+1. Configure **OpenAI API** credentials in Pi: use `/login` and choose OpenAI's API-key option, or set `OPENAI_API_KEY` in your environment. A ChatGPT/Codex subscription alone does not provide OpenAI API Flex.
+2. Run `/model` and select a [Flex-supported model](https://developers.openai.com/api/docs/guides/flex-processing) under provider **`openai`**, not `openai-codex`.
+3. Run `/flex on`, then send a prompt. The footer shows `💪 flex:on`.
+4. After the reply, run `/flex audit` to check what tier was sent and what OpenAI reported serving. Run `/flex savings` for estimated savings on the last call and current session branch.
+5. Run `/flex off` to request standard processing on subsequent calls.
+
+New sessions start with Flex off. Flex can be slower or unavailable; Flexy does not silently fall back to standard-tier requests. Savings are estimates, not billing receipts.
 
 ## Commands
 
@@ -155,13 +138,45 @@ No global `fetch` patch. Flexy wraps only Pi's OpenAI Responses adapter and inje
 
 Other payload handlers can change the selected tier; audit reflects the serialized result rather than hiding the conflict. Multiple extensions replacing the same provider adapter cannot guarantee full transport coverage. Prefer one owner; inspect `coverage` in the audit.
 
+## Other installation options
+
+To try Flexy for one Pi run without adding it to your saved package settings:
+
+```bash
+pi -e npm:@dowhilegeek/pi-flexy
+```
+
+Or install from the [GitHub repository](https://github.com/DoWhileGeek/pi-flexy) instead of npm:
+
+```bash
+pi install git:github.com/DoWhileGeek/pi-flexy
+```
+
+Choose one source; don't also load a local checkout of the same extension.
+
 ## Development
+
+From this checkout:
 
 ```bash
 npm ci --ignore-scripts
 npm run check
 npm run check:package
 ```
+
+Load the source for one Pi run:
+
+```bash
+pi -e ./extensions/flex.ts
+```
+
+Or register the checkout as a local Pi package:
+
+```bash
+pi install /absolute/path/to/flexy
+```
+
+Then restart Pi or run `/reload`. Use either the local checkout or an npm/GitHub installation, not both.
 
 Tests cover mode/state, branching, malformed session entries, command parsing, provider isolation, final-payload overrides, request/response mismatches, retries, HTTP errors, cancellation, bounded SSE parsing, metadata privacy, savings math without double-discounting, price-tier thresholds, historical recovery, full-branch totals beyond 50 calls, native OpenAI SDK requests to a local HTTP server, and loading/reloading through a real Pi agent session. No real OpenAI credentials or paid API requests are needed.
 
