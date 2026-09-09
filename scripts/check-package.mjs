@@ -13,7 +13,7 @@ assert.deepEqual(pkg.pi.extensions, ["./extensions/flex.ts"]);
 assert.equal(pkg.repository.url, "git+https://github.com/DoWhileGeek/pi-flexy.git");
 assert.equal(pkg.publishConfig.access, "public");
 assert.equal(pkg.publishConfig.registry, "https://registry.npmjs.org/");
-for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent"]) {
+for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "@earendil-works/pi-tui"]) {
   assert.equal(pkg.peerDependencies[name], "*", "Pi supplies core packages at runtime");
   assert.equal(pkg.peerDependenciesMeta[name].optional, true);
   assert.equal(pkg.dependencies?.[name], undefined, "Do not bundle another Pi runtime");
@@ -27,7 +27,7 @@ const output = process.env.npm_execpath
 const [packed] = JSON.parse(output);
 const allowed = [
   "LICENSE", "README.md", "package.json", "extensions/flex.ts",
-  "src/audit.ts", "src/pricing.ts", "src/retry.ts", "src/savings.ts", "src/transport.ts",
+  "src/activity.ts", "src/config.ts", "src/audit.ts", "src/pricing.ts", "src/retry.ts", "src/savings.ts", "src/transport.ts",
 ];
 assert.deepEqual(packed.files.map(file => file.path).sort(), allowed.sort(), "Unexpected or missing npm files; review before releasing");
 assert.equal(packed.name, pkg.name);

@@ -42,21 +42,62 @@ You can also run `/flex on` in an existing session. Send a prompt, then run `/fl
 | `/flex savings` | Show estimated savings for the last call and current session branch |
 | `/flex history` | Show recent calls |
 | `/flex retries` | Show retry budget |
-| `/flex retries N` | Set retries after initial attempt, from 0–10 |
+| `/flex retries N` | Save global retry budget, from 0–10 |
+| `/flex fallback` | Show standard-tier fallback preference |
+| `/flex fallback on\|off` | Save global fallback preference (default off) |
 | `/flex help` | Show all options |
 
 The footer shows `💪 flex:on` or `💪 flex:off`. New sessions start with Flex off unless launched with `--flex`.
 
 Both `--flex` and `/flex on` affect only models using Pi's native `openai` provider and `openai-responses` API. With Codex subscriptions or other providers, Flexy shows `flex:on (inactive)` and leaves requests untouched.
 
-## Retries
+## Retries and standard-tier fallback
 
-Flex capacity errors can arrive inside an HTTP 200 event stream. Flexy retries those failures inside the original provider call, before Pi sees a failed assistant turn. This keeps any steering message you type while waiting out of the retry payload.
+Retryable errors can arrive inside an HTTP 200 stream, not just as HTTP errors. Flexy handles retries inside the original provider call, so queued steering does not enter the retried request. Error classification uses Pi's transient-error classifier; it does not imply a particular HTTP status or prove a Flex capacity rejection.
 
-Retries use the same post-hook payload and stay on `service_tier=flex`. Backoff starts at two seconds, doubles, and caps at 30 seconds. Flexy retries only transient failures that produced no text, reasoning, or tool calls. Once output starts, it will not replay the request.
+By default, Flexy allows two Flex retries after the initial attempt, with fallback **off**. Backoff starts at two seconds, doubles, and caps at 30 seconds. Text, reasoning, or tool-call output prevents automatic replay. Cancellation and non-retryable errors do not trigger fallback.
 
-After the configured budget is exhausted, Flexy returns one terminal error that Pi will not retry again. `/flex audit` shows the retry count, every observed HTTP attempt, and whether the budget was exhausted. Retry count follows the current session branch, like Flex mode.
+Enable one standard-tier attempt after the Flex budget is exhausted:
 
-Flex can still be slow or unavailable. Flexy won't silently switch to standard pricing; use `/flex off` if you want to retry without Flex. Savings are estimates, not billing records.
+```text
+/flex retries 2
+/flex fallback on
+```
+
+That sequence permits **Flex → Flex → Flex → default**. For an immediate switch after the initial Flex failure, use `/flex retries 0` with fallback enabled: **Flex → default**.
+
+**Fallback uses standard pricing.** It changes only the failed provider call, not your session's Flex mode. The next new model call starts on Flex again. Fallback gets exactly one attempt; if it fails, Flexy stops rather than returning to Flex or allowing Pi to add more retries. Managed Flex calls disable SDK-level retries so HTTP retries cannot multiply this budget. Standard-mode calls keep their normal Pi behavior.
+
+Retries use a detached snapshot of the final post-hook JSON payload. Fallback changes only `service_tier` to `default`; it does not rerun payload hooks or include queued input. `/flex audit` records each HTTP attempt, the retry budget, and whether fallback was used. A successful default-tier response contributes no Flex savings.
+
+### Session activity
+
+Retries and fallback appear live in the Pi transcript, not just in transient notifications:
+
+```text
+[2026-09-09 20:10:11.123 UTC] Flexy: Flex request failed. Retry 1/2 scheduled in 2s (still Flex pricing).
+[2026-09-09 20:10:13.125 UTC] Flexy: Retrying failed request on Flex (1/2).
+...
+[2026-09-09 20:10:25.400 UTC] Flexy: Falling back to non-Flex after 3 failed Flex attempt(s).
+Requesting default tier at standard pricing for this call only. Session Flex mode unchanged.
+```
+
+The fallback notice uses warning coloring and is recorded when the default-tier request reaches the HTTP transport. It reports requested pricing, not a billing confirmation; `/flex audit` shows the response-tier evidence. Cancelling before that handoff does not produce a fallback marker.
+
+Entries retain their original UTC timestamps across resume and reload. Expand an entry to see its audit call ID. The footer also shows retry/backoff or the current standard-tier fallback while active. These are custom session entries, never model messages: they do not steer the agent, trigger extra turns, or enter prompts/compaction context. No prompts, generated output, or raw provider errors are stored in activity entries. Print mode writes the same activity text to stderr; JSON/RPC clients receive native `entry_appended` events.
+
+### Preferences across sessions
+
+`/flex retries N` and `/flex fallback on|off` save preferences in `~/.pi/agent/flexy.json` (or `$PI_CODING_AGENT_DIR/flexy.json`). Existing sessions read preferences before each new managed call. In-flight calls keep the policy they started with. Branch navigation does not rewind these preferences; older branch-local retry settings are superseded by global preferences. Flex on/off mode remains branch-local.
+
+Startup flags also save these preferences:
+
+```bash
+pi --flex --flex-retries 0 --flex-fallback on
+```
+
+Omit those preference flags to keep saved values; `--flex-fallback off` disables fallback. Invalid configuration produces a warning and uses two retries with fallback off, without rewriting the file. Failed preference writes are reported instead of silently changing the active policy.
+
+Flex can still be slow or unavailable. Fallback is never enabled implicitly. Savings are estimates, not billing records.
 
 Inspired by [pi-flex-processing](https://github.com/laxman-patel/pi-flex-processing).

@@ -147,3 +147,77 @@ test("non-transient failures pass through unchanged; abort during backoff starts
   assert.equal(aborted.result.stopReason, "aborted");
   assert.equal(aborted.result.errorMessage, "Flex retry cancelled.");
 });
+
+test("fallback happens once after configured Flex budget, including zero", async () => {
+  for (const maxRetries of [0, 2]) {
+    const tiers: string[] = [];
+    let announced = 0;
+    const { events, result } = await collect(retryFlexStream(tier => {
+      tiers.push(tier);
+      return tier === "flex" ? failed() : succeeded();
+    }, { maxRetries, fallback: true, baseDelayMs: 0, createError: internalError, onFallback: () => { announced++; } }));
+    assert.deepEqual(tiers, [...Array(maxRetries + 1).fill("flex"), "default"]);
+    assert.equal(announced, 1);
+    assert.equal(result.stopReason, "stop");
+    assert.equal(events.filter(e => e.type === "start").length, 1);
+    assert.equal(events.filter(e => e.type === "error").length, 0);
+  }
+});
+
+test("fallback failure cannot cause Pi to restart retries; partial output is preserved", async () => {
+  for (const text of ["too many requests", "billing quota exceeded", "unsupported model"]) {
+    const tiers: string[] = [];
+    const { result } = await collect(retryFlexStream(tier => {
+      tiers.push(tier);
+      return failed(tier === "flex" ? "too many requests" : text);
+    }, { maxRetries: 0, fallback: true, baseDelayMs: 0, createError: internalError }));
+    assert.deepEqual(tiers, ["flex", "default"]);
+    assert.match(result.errorMessage!, /standard-tier fallback failed/);
+    assert.equal(isRetryableAssistantError(result), false);
+  }
+});
+
+test("no paid fallback on abort, deterministic error, or any output", async () => {
+  for (const kind of ["abort", "billing", "text", "thinking", "toolcall"] as const) {
+    const tiers: string[] = [];
+    const { result } = await collect(retryFlexStream(tier => {
+      tiers.push(tier);
+      if (kind === "billing") return failed("billing quota exceeded");
+      const error = message(kind === "abort" ? "aborted" : "error", "too many requests");
+      const events: AssistantMessageEvent[] = [{ type: "start", partial: message("pending") }];
+      if (kind !== "abort") events.push({ type: `${kind}_start`, contentIndex: 0, partial: message("pending") });
+      events.push({ type: "error", reason: kind === "abort" ? "aborted" : "error", error });
+      return source(events);
+    }, { maxRetries: 0, fallback: true, baseDelayMs: 0, createError: internalError }));
+    assert.deepEqual(tiers, ["flex"]);
+    if (kind === "abort") assert.equal(result.stopReason, "aborted");
+  }
+});
+
+test("abort at fallback boundary prevents standard request", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const { result } = await collect(retryFlexStream(() => { calls++; return failed(); }, {
+    maxRetries: 0, fallback: true, signal: controller.signal, createError: internalError,
+    onFallback: () => controller.abort(),
+  }));
+  assert.equal(calls, 1);
+  assert.equal(result.stopReason, "aborted");
+});
+
+test("fallback partial output survives failure without replay", async () => {
+  const tiers: string[] = [];
+  const partial: AssistantMessage = { ...message("error", "too many requests"), content: [{ type: "text", text: "partial" }] };
+  const { events, result } = await collect(retryFlexStream(tier => {
+    tiers.push(tier);
+    return tier === "flex" ? failed() : source([
+      { type: "start", partial: message("pending") },
+      { type: "text_delta", contentIndex: 0, delta: "partial", partial },
+      { type: "error", reason: "error", error: partial },
+    ]);
+  }, { maxRetries: 0, fallback: true, createError: internalError }));
+  assert.deepEqual(tiers, ["flex", "default"]);
+  assert.ok(events.some(e => e.type === "text_delta"));
+  assert.deepEqual(result.content, partial.content);
+  assert.equal(isRetryableAssistantError(result), false);
+});

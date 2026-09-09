@@ -8,7 +8,18 @@ import { test } from "node:test";
 import {
   createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { ACTIVITY_ENTRY, decodeActivity } from "../src/activity.ts";
 import { AUDIT_ENTRY, decodeAudit, verdict } from "../src/audit.ts";
+
+async function testExtension(dir: string): Promise<string> {
+  const path = join(dir, "flexy-test-extension.ts");
+  const extension = fileURLToPath(new URL("../extensions/flex.ts", import.meta.url));
+  const config = fileURLToPath(new URL("../src/config.ts", import.meta.url));
+  await writeFile(path, `import { configureFlexy } from ${JSON.stringify(extension)};
+import { FlexConfig } from ${JSON.stringify(config)};
+export default pi => configureFlexy(pi, new FlexConfig(${JSON.stringify(join(dir, "flexy.json"))}));`);
+  return path;
+}
 
 function completedSse(id: string, tier: string): string {
   const response = { id, object: "response", status: "completed", service_tier: tier, output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
@@ -50,7 +61,7 @@ test("real Pi loader + startup flag + agent session + reload: commands stay loca
     const settingsManager = SettingsManager.inMemory({ retry: { enabled: false }, compaction: { enabled: false } });
     const resourceLoader = new DefaultResourceLoader({
       cwd: dir, agentDir: dir, settingsManager,
-      additionalExtensionPaths: [fileURLToPath(new URL("../extensions/flex.ts", import.meta.url))],
+      additionalExtensionPaths: [await testExtension(dir)],
       noExtensions: true, noSkills: true, noThemes: true, noContextFiles: true, noPromptTemplates: true,
       systemPrompt: "Reply briefly.",
     });
@@ -123,6 +134,7 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
   const dir = await mkdtemp(join(tmpdir(), "flexy-sdk-retry-"));
   const bodies: string[] = [];
   let failAll = false;
+  let failFlex = false;
   let firstSeenResolve: (() => void) | undefined;
   const firstSeen = new Promise<void>(resolve => { firstSeenResolve = resolve; });
   const server = createServer(async (req, res) => {
@@ -131,7 +143,7 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
     bodies.push(body);
     const tier = JSON.parse(body).service_tier as string;
     res.writeHead(200, { "content-type": "text/event-stream", "x-request-id": `req_${bodies.length}` });
-    if (failAll || bodies.length === 1) {
+    if (failAll || (failFlex && tier === "flex") || bodies.length === 1) {
       res.end(failedSse("resp_failed", tier));
       firstSeenResolve?.();
     } else {
@@ -155,7 +167,7 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
     const settingsManager = SettingsManager.inMemory({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 }, compaction: { enabled: false } });
     const resourceLoader = new DefaultResourceLoader({
       cwd: dir, agentDir: dir, settingsManager,
-      additionalExtensionPaths: [fileURLToPath(new URL("../extensions/flex.ts", import.meta.url))],
+      additionalExtensionPaths: [await testExtension(dir)],
       noExtensions: true, noSkills: true, noThemes: true, noContextFiles: true, noPromptTemplates: true,
       systemPrompt: "Reply briefly.",
     });
@@ -163,7 +175,7 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
     const loadedExtensions = resourceLoader.getExtensions();
     loadedExtensions.runtime.flagValues.set("flex", true);
     loadedExtensions.runtime.flagValues.set("flex-retries", "1");
-    const sessionManager = SessionManager.inMemory(dir);
+    const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
     const { session } = await createAgentSession({
       cwd: dir, agentDir: dir, model: { ...builtin, baseUrl }, modelRuntime, resourceLoader, sessionManager, settingsManager,
       noTools: "all", thinkingLevel: "off",
@@ -171,6 +183,13 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
     dispose = () => session.dispose();
     await session.bindExtensions({ onError: error => assert.fail(error.error) });
 
+    const liveActivities: unknown[] = [];
+    session.subscribe(event => {
+      if (event.type === "entry_appended" && event.entry.type === "custom" && event.entry.customType === ACTIVITY_ENTRY) {
+        assert.equal(session.isStreaming, true, "activity arrives live during failed request, not after turn");
+        liveActivities.push(event.entry.data);
+      }
+    });
     const run = session.prompt("first instruction");
     await firstSeen;
     assert.equal(session.isStreaming, true);
@@ -193,6 +212,7 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
     assert.equal(audits.length, 2);
     assert.deepEqual(audits[0]?.flexRetry, { limit: 1, performed: 1, terminalReason: "success" });
     assert.equal(audits[0]?.attemptCount, 2);
+    assert.deepEqual(liveActivities.map(data => decodeActivity(data)?.kind), ["retry-scheduled", "retry-started"]);
 
     await session.prompt("/flex retries 0");
     failAll = true;
@@ -202,6 +222,42 @@ test("real Pi session keeps steering out of frozen Flex retry payload", async ()
     const last = session.messages.at(-1);
     assert.equal(last?.role, "assistant");
     if (last?.role === "assistant") assert.match(last.errorMessage!, /1 total stream attempt/);
+
+    await session.prompt("/flex fallback on");
+    const beforeFallbackFailure = bodies.length;
+    await session.prompt("fallback also fails");
+    assert.equal(bodies.length, beforeFallbackFailure + 2, "one Flex + one default, even with Pi auto-retry enabled");
+    const fallbackError = session.messages.at(-1);
+    if (fallbackError?.role === "assistant") assert.match(fallbackError.errorMessage!, /standard-tier fallback failed/);
+
+    failAll = false;
+    failFlex = true;
+    const beforeFallback = bodies.length;
+    const fallbackFirstSeen = new Promise<void>(resolve => { firstSeenResolve = resolve; });
+    const fallbackRun = session.prompt("fallback original instruction");
+    await fallbackFirstSeen;
+    await session.prompt("fallback queued instruction", { streamingBehavior: "steer" });
+    await fallbackRun;
+    const fallbackBodies = bodies.slice(beforeFallback).map(body => JSON.parse(body));
+    assert.deepEqual(fallbackBodies.map(body => body.service_tier), ["flex", "default", "flex", "default"]);
+    assert.deepEqual(fallbackBodies[1], { ...fallbackBodies[0], service_tier: "default" });
+    assert.doesNotMatch(JSON.stringify(fallbackBodies[1]), /fallback queued instruction/);
+    assert.match(JSON.stringify(fallbackBodies[2]), /fallback queued instruction/);
+    assert.deepEqual(liveActivities.map(data => decodeActivity(data)?.kind), [
+      "retry-scheduled", "retry-started", "fallback-started", "fallback-started", "fallback-started",
+    ]);
+    for (const body of bodies) assert.doesNotMatch(body, /flexy:activity|Retrying failed request|Falling back to non-Flex|still Flex pricing/);
+    const savedPath = sessionManager.getSessionFile();
+    assert.ok(savedPath);
+    const reopened = SessionManager.open(savedPath);
+    const savedActivities = reopened.getBranch().filter(e => e.type === "custom" && e.customType === ACTIVITY_ENTRY);
+    assert.deepEqual(savedActivities.map(e => e.type === "custom" ? e.data : null), liveActivities, "timestamps and events survive disk resume");
+    const contextBefore = session.messages;
+    await session.reload();
+    const renderer = session.extensionRunner?.getEntryRenderer(ACTIVITY_ENTRY);
+    assert.ok(renderer, "entry renderer restored on extension reload");
+    assert.deepEqual(session.messages, contextBefore, "custom entries never enter model history, even after reload");
+
   } finally {
     dispose?.();
     server.closeAllConnections();

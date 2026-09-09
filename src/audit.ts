@@ -42,6 +42,7 @@ export interface Audit {
   attemptCount: number;
   attempts: Attempt[];
   flexRetry?: FlexRetrySummary;
+  fallback?: { enabled: boolean; attemptNumber?: number };
   // Undefined is a pre-savings audit; null means pricing was unavailable for a new call.
   pricing?: PricingSnapshot | null;
   usage?: UsageSnapshot;
@@ -71,7 +72,7 @@ export function scopeReason(model: ModelIdentity | undefined): string {
   if (!model) return "No active model.";
   if (model.provider === "openai-codex") return "Codex subscription is not OpenAI API Flex; requests untouched.";
   if (!managed(model)) return "Only provider=openai, api=openai-responses is managed; requests untouched.";
-  return "OpenAI Responses API. Model availability is validated by OpenAI; no standard-tier fallback.";
+  return "OpenAI Responses API. Model availability is validated by OpenAI; standard-tier fallback requires explicit opt-in.";
 }
 export function identity(model: ModelIdentity): ModelIdentity {
   return { provider: model.provider, id: model.id, api: model.api };
@@ -112,7 +113,7 @@ export function decodeAudit(data: unknown): Audit | undefined {
   if (isRecord(data.flexRetry)) {
     const limit = parseFlexRetries(data.flexRetry.limit);
     const performed = parseFlexRetries(data.flexRetry.performed);
-    const terminalReason = ["success", "budget-exhausted", "partial-output", "pass-through", "aborted", "internal-error"]
+    const terminalReason = ["success", "budget-exhausted", "partial-output", "pass-through", "aborted", "internal-error", "fallback-failed"]
       .includes(String(data.flexRetry.terminalReason)) ? data.flexRetry.terminalReason as FlexRetryTerminalReason : undefined;
     if (limit !== undefined && performed !== undefined && performed <= limit) flexRetry = { limit, performed, terminalReason };
   }
@@ -124,6 +125,12 @@ export function decodeAudit(data: unknown): Audit | undefined {
     coverage: data.coverage as Audit["coverage"], outcome: data.outcome as Outcome,
     payloadTier: data.payloadTier === undefined ? undefined : savedTier(data.payloadTier),
     attemptCount: data.attemptCount, attempts, flexRetry,
+    fallback: isRecord(data.fallback) && typeof data.fallback.enabled === "boolean" ? {
+      enabled: data.fallback.enabled,
+      attemptNumber: data.fallback.enabled === true && Number.isSafeInteger(data.fallback.attemptNumber) &&
+        Number(data.fallback.attemptNumber) >= 2 && Number(data.fallback.attemptNumber) <= data.attemptCount + 1
+        ? Number(data.fallback.attemptNumber) : undefined,
+    } : undefined,
     pricing: data.pricing === undefined ? undefined : decodePricing(data.pricing) ?? null,
     usage: decodeUsage(data.usage),
   };
@@ -215,8 +222,10 @@ export function verdict(audit: Audit): { sentAsFlex: string; servedAsFlex: strin
   const servedAsFlex = confirmed && last.responseTier === "flex" ? "YES"
     : confirmed && ["default", "priority", "scale"].includes(last.responseTier ?? "") ? "NO" : "UNKNOWN";
   const expected = audit.mode === "on" ? "flex" : "default";
-  const mismatch = audit.mode !== "unknown" && managed(audit.model) && (tiers.some(t => t !== "unknown" && t !== expected) ||
-    (confirmed === true && last?.responseTier !== undefined && last.responseTier !== "unknown" && last.responseTier !== expected));
+  const expectedFor = (attempt: Attempt | undefined): string => audit.mode === "on" && audit.fallback?.enabled &&
+    attempt?.number === audit.fallback.attemptNumber ? "default" : expected;
+  const mismatch = audit.mode !== "unknown" && managed(audit.model) && (audit.attempts.some(a => a.sentTier !== "unknown" && a.sentTier !== expectedFor(a)) ||
+    (confirmed === true && last?.responseTier !== undefined && last.responseTier !== "unknown" && last.responseTier !== expectedFor(last)));
   return { sentAsFlex, servedAsFlex, mismatch };
 }
 
@@ -239,6 +248,7 @@ export function formatAudit(audit: Audit | undefined): string {
     const terminal = audit.flexRetry.terminalReason ? ` | terminal: ${audit.flexRetry.terminalReason}` : "";
     lines.push(`Flex stream retries: ${audit.flexRetry.performed}/${audit.flexRetry.limit}${terminal}`);
   }
+  if (audit.fallback) lines.push(`Standard-tier fallback: ${audit.fallback.enabled ? "enabled" : "off"}${audit.fallback.attemptNumber ? ` | attempt ${audit.fallback.attemptNumber} (standard pricing)` : " | not used"}`);
   for (const attempt of audit.attempts) {
     lines.push(`Attempt ${attempt.number}: sent=${attempt.sentTier}, HTTP=${attempt.status ?? "not received"}, response=${attempt.responseTier ?? "not reported"}${attempt.networkError ? ", transport error" : ""}`);
     if (attempt.origin) lines.push(`  Origin: ${attempt.origin}`);

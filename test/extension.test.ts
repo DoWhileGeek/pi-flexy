@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
 import { isRetryableAssistantError, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext, ProviderConfig, RegisteredCommand } from "@earendil-works/pi-coding-agent";
-import flexy from "../extensions/flex.ts";
+import type { ExtensionAPI, ExtensionCommandContext, ProviderConfig, RegisteredCommand, EntryRenderer } from "@earendil-works/pi-coding-agent";
+import { configureFlexy } from "../extensions/flex.ts";
 import { AUDIT_ENTRY, decodeAudit, type Entry, isRecord, verdict } from "../src/audit.ts";
+
+import { ACTIVITY_ENTRY, decodeActivity, formatActivity } from "../src/activity.ts";
+import { FlexConfig } from "../src/config.ts";
+const testDir = mkdtempSync(join(tmpdir(), "flexy-config-tests-"));
+after(() => rmSync(testDir, { recursive: true, force: true }));
+let configIndex = 0;
 
 type Command = Omit<RegisteredCommand, "name" | "sourceInfo">;
 type Handler = (event: never, ctx: ExtensionCommandContext) => unknown;
@@ -13,12 +22,13 @@ const baseModel: Model<"openai-responses"> = {
   baseUrl: "http://127.0.0.1/v1", reasoning: false, input: ["text"],
   cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 256,
 };
-function harness(options: { flex?: boolean; flexRetries?: string } = {}) {
+function harness(options: { flex?: boolean; flexRetries?: string; configPath?: string; onAppend?: (type: string, data: unknown) => void } = {}) {
   let entries: Entry[] = [];
   const notices: string[] = [];
   const noticeLevels: Array<string | undefined> = [];
   const statuses = new Map<string, string | undefined>();
   const handlers = new Map<string, Handler>();
+  const renderers = new Map<string, EntryRenderer>();
   const commands = new Map<string, Command>();
   const flags = new Map<string, { description?: string; type: "boolean" | "string"; default?: boolean | string }>();
   const flagValues = new Map<string, boolean | string>();
@@ -32,6 +42,7 @@ function harness(options: { flex?: boolean; flexRetries?: string } = {}) {
   } as unknown as ExtensionCommandContext;
   const api = {
     on: (name: string, handler: Handler) => handlers.set(name, handler),
+    registerEntryRenderer: (name: string, renderer: EntryRenderer) => renderers.set(name, renderer),
     registerCommand: (name: string, command: Command) => commands.set(name, command),
     registerFlag: (name: string, flag: { description?: string; type: "boolean" | "string"; default?: boolean | string }) => {
       flags.set(name, flag);
@@ -39,9 +50,13 @@ function harness(options: { flex?: boolean; flexRetries?: string } = {}) {
     },
     getFlag: (name: string) => flagValues.get(name),
     registerProvider: (name: string, config: ProviderConfig) => { assert.equal(name, "openai"); provider = config; },
-    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data: structuredClone(data) }),
+    appendEntry: (customType: string, data: unknown) => {
+      options.onAppend?.(customType, data);
+      entries.push({ type: "custom", customType, data: structuredClone(data) });
+    },
   } as unknown as ExtensionAPI;
-  flexy(api);
+  const configPath = options.configPath ?? join(testDir, `${++configIndex}.json`);
+  configureFlexy(api, new FlexConfig(configPath));
   const emit = (name: string, event: unknown = {}) => handlers.get(name)?.(event as never, ctx);
   const command = (text: string) => commands.get("flex")!.handler(text, ctx);
   const lastAudit = () => decodeAudit(entries.filter(e => e.customType === AUDIT_ENTRY).at(-1)?.data)!;
@@ -62,7 +77,7 @@ function harness(options: { flex?: boolean; flexRetries?: string } = {}) {
     entries.push({ type: "message", message });
     return { message, events };
   };
-  return { ctx, commands, flags, command, emit, notices, noticeLevels, statuses, run, lastAudit,
+  return { configPath, ctx, renderers, commands, flags, command, emit, notices, noticeLevels, statuses, run, lastAudit,
     get entries() { return entries; }, replaceBranch: (next: Entry[]) => { entries = next; } };
 }
 
@@ -132,7 +147,7 @@ test("commands, autocomplete, invalid args, branch restoration, instance isolati
   await h.emit("session_tree");
   assert.equal(h.statuses.get("flexy"), "💪 flex:off");
   await h.command("retries");
-  assert.match(h.notices.at(-1)!, /2 after initial/);
+  assert.match(h.notices.at(-1)!, /5 after initial/);
   const second = harness();
   await second.emit("session_start");
   await h.command("on");
@@ -310,7 +325,7 @@ test("Flex retry exhaustion is final for Pi and never falls back to default", as
   assert.match(h.notices.at(-1)!, /terminal: budget-exhausted/);
 });
 
-test("native HTTP retries remain Flex; no invisible fallback; records every HTTP attempt", async () => {
+test("managed retries replace SDK retries; every HTTP attempt is counted", async () => {
   const h = harness();
   await h.emit("session_start");
   await h.command("on");
@@ -460,4 +475,132 @@ test("savings does not invent a discount for unknown tier, standard fallback, or
   await h.run({ fetch: mockFetch() });
   await h.command("savings --json");
   assert.equal(JSON.parse(h.notices.at(-1)!).lastCall.status, "unavailable");
+});
+
+test("global retries/fallback survive new sessions, tree navigation and other active sessions", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("retries 0");
+  await h.command("fallback on");
+  assert.match(h.notices.at(-1)!, /standard pricing/);
+  const other = harness({ configPath: h.configPath });
+  await other.emit("session_start");
+  await other.command("status");
+  assert.match(other.notices.at(-1)!, /Flex retries: 0/);
+  assert.match(other.notices.at(-1)!, /fallback: ON/);
+  h.replaceBranch([]);
+  await h.emit("session_tree");
+  await h.command("status");
+  assert.match(h.notices.at(-1)!, /Flex retries: 0/);
+  assert.match(h.notices.at(-1)!, /fallback: ON/);
+  await other.command("fallback off");
+  await h.command("fallback");
+  assert.match(h.notices.at(-1)!, /OFF/);
+  await h.command("fallback yes");
+  assert.match(h.notices.at(-1)!, /Invalid/);
+});
+
+test("one default fallback changes only tier; next new call stays Flex, audit and savings stay honest", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 0");
+  await h.command("fallback on");
+  const bodies: Record<string, unknown>[] = [];
+  const mutable = { value: "original" };
+  let hooks = 0;
+  const result = await h.run({
+    maxRetries: 5,
+    onPayload: payload => { hooks++; return { ...(payload as object), metadata: mutable }; },
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (body.service_tier === "flex") {
+        mutable.value = "changed outside provider";
+        return new Response(failedSse(), { headers: { "content-type": "text/event-stream" } });
+      }
+      return mockFetch("default")(_input, init);
+    },
+  });
+  assert.equal(result.message.stopReason, "stop");
+  assert.equal(hooks, 1);
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[1], { ...bodies[0], service_tier: "default" });
+  const audit = h.lastAudit();
+  assert.deepEqual(audit.fallback, { enabled: true, attemptNumber: 2 });
+  assert.deepEqual(verdict(audit), { sentAsFlex: "MIXED", servedAsFlex: "NO", mismatch: false });
+  const activity = h.entries.filter(e => e.customType === ACTIVITY_ENTRY).map(e => decodeActivity(e.data)!);
+  assert.deepEqual(activity.map(a => a.kind), ["fallback-started"]);
+  assert.equal(activity[0]!.at, audit.attempts[1]!.startedAt);
+  assert.match(formatActivity(activity[0]!), /standard pricing/);
+  await h.command("audit");
+  assert.match(h.notices.at(-1)!, /attempt 2 \(standard pricing\)/);
+  await h.command("savings --json");
+  assert.equal(JSON.parse(h.notices.at(-1)!).lastCall.savedUsd, 0);
+  await h.run({ fetch: mockFetch() });
+  assert.equal(h.lastAudit().attempts[0]?.sentTier, "flex");
+  assert.equal(h.lastAudit().fallback?.attemptNumber, undefined);
+  assert.equal(h.statuses.get("flexy"), "💪 flex:on");
+});
+
+test("cancelled backoff renders scheduled retry only; no false fallback pricing switch", async () => {
+  const controller = new AbortController();
+  const h = harness({ onAppend: (type, data) => {
+    if (type === ACTIVITY_ENTRY && decodeActivity(data)?.kind === "retry-scheduled") controller.abort();
+  } });
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 1");
+  await h.command("fallback on");
+  let requests = 0;
+  const result = await h.run({ signal: controller.signal, fetch: async () => {
+    requests++;
+    return new Response(failedSse(), { headers: { "content-type": "text/event-stream" } });
+  } });
+  assert.equal(result.message.stopReason, "aborted");
+  assert.equal(requests, 1);
+  assert.deepEqual(h.entries.filter(e => e.customType === ACTIVITY_ENTRY).map(e => decodeActivity(e.data)?.kind), ["retry-scheduled"]);
+  assert.equal(h.statuses.get("flexy"), "💪 flex:on");
+});
+
+test("abort before default transport handoff does not render a pricing switch", async () => {
+  const controller = new AbortController();
+  const h = harness({ onAppend: (type, data) => {
+    if (type === AUDIT_ENTRY && decodeAudit(data)?.fallback?.attemptNumber) controller.abort();
+  } });
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 0");
+  await h.command("fallback on");
+  let requests = 0;
+  const result = await h.run({ signal: controller.signal, fetch: async () => {
+    requests++;
+    return new Response(failedSse(), { headers: { "content-type": "text/event-stream" } });
+  } });
+  assert.equal(result.message.stopReason, "aborted");
+  assert.equal(requests, 1);
+  assert.equal(h.entries.filter(e => e.customType === ACTIVITY_ENTRY).length, 0);
+});
+
+test("activity persistence/UI failure cannot prevent fallback HTTP request", async () => {
+  const h = harness({ onAppend: type => {
+    if (type === ACTIVITY_ENTRY) throw new Error("Simulated entry write failure");
+  } });
+  await h.emit("session_start");
+  await h.command("on");
+  await h.command("retries 0");
+  await h.command("fallback on");
+  const setStatus = h.ctx.ui.setStatus;
+  h.ctx.ui.setStatus = (key, text) => {
+    if (text?.includes("current:default")) throw new Error("Simulated UI failure");
+    setStatus(key, text);
+  };
+  let requests = 0;
+  const result = await h.run({ fetch: async (input, init) => {
+    requests++;
+    return requests === 1 ? new Response(failedSse(), { headers: { "content-type": "text/event-stream" } }) : mockFetch("default")(input, init);
+  } });
+  assert.equal(requests, 2);
+  assert.equal(result.message.stopReason, "stop");
+  assert.ok(h.notices.some(n => n.includes("Session activity entry could not be saved")));
 });

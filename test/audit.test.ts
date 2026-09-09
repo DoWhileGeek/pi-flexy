@@ -167,3 +167,26 @@ test("Flex retry audit metadata decodes safely and formats exhaustion", () => {
   assert.match(formatAudit(call), /Flex stream retries: 2\/2 \| terminal: budget-exhausted/);
   assert.equal(decodeAudit({ ...call, flexRetry: { limit: 2, performed: 9, terminalReason: "secret" } })?.flexRetry, undefined);
 });
+
+test("authorized fallback survives decoding; unrelated tier overrides still mismatch", () => {
+  const { store } = fixture();
+  store.setMode("on");
+  const audit = store.begin(model, "transport");
+  audit.flexRetry = { limit: 0, performed: 0, terminalReason: "fallback-failed" };
+  audit.fallback = { enabled: true, attemptNumber: 2 };
+  audit.attemptCount = 2;
+  audit.attempts = [
+    { number: 1, startedAt: audit.startedAt, sentTier: "flex" },
+    { number: 2, startedAt: audit.startedAt, sentTier: "default", status: 200, terminalResponse: true, responseTier: "default" },
+  ];
+  audit.outcome = "complete";
+  const decoded = decodeAudit(JSON.parse(JSON.stringify(audit)))!;
+  assert.deepEqual(decoded.fallback, audit.fallback);
+  assert.deepEqual(decoded.flexRetry, audit.flexRetry);
+  assert.equal(verdict(decoded).mismatch, false);
+  decoded.attempts[0]!.sentTier = "default";
+  assert.equal(verdict(decoded).mismatch, true);
+  decoded.attempts[0]!.sentTier = "flex";
+  decoded.attempts[1]!.responseTier = "flex";
+  assert.equal(verdict(decoded).mismatch, true);
+});

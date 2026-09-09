@@ -14,9 +14,11 @@ export type FlexRetryTerminalReason =
   | "partial-output"
   | "pass-through"
   | "aborted"
-  | "internal-error";
+  | "internal-error"
+  | "fallback-failed";
 
 export interface FlexRetryCallbacks {
+  onFallback?: () => void;
   onRetryScheduled?: (attempt: number, maxRetries: number, delayMs: number) => void;
   onRetryStart?: (attempt: number, maxRetries: number) => void;
   onTerminal?: (reason: FlexRetryTerminalReason, retriesPerformed: number) => void;
@@ -24,6 +26,7 @@ export interface FlexRetryCallbacks {
 
 export interface FlexRetryOptions extends FlexRetryCallbacks {
   maxRetries: number;
+  fallback?: boolean;
   baseDelayMs?: number;
   signal?: AbortSignal;
   shouldRetry?: (message: AssistantMessage) => boolean;
@@ -63,7 +66,7 @@ function exhaustedMessage(message: AssistantMessage, attempts: number): Assistan
     ...message,
     content: [],
     stopReason: "error",
-    errorMessage: `Flexy exhausted configured Flex capacity budget after ${attempts} total stream attempt${attempts === 1 ? "" : "s"}. Standard processing was not used. See /flex audit.`,
+    errorMessage: `Flexy exhausted configured Flex retry budget after ${attempts} total stream attempt${attempts === 1 ? "" : "s"}. Standard processing was not used. See /flex audit.`,
   };
 }
 
@@ -84,7 +87,7 @@ function abortedMessage(message: AssistantMessage): AssistantMessage {
  * assistant turn, so steering queued during backoff cannot enter retry payloads.
  */
 export function retryFlexStream(
-  produce: () => AssistantMessageEventStream,
+  produce: (tier: "flex" | "default") => AssistantMessageEventStream,
   options: FlexRetryOptions,
 ): AssistantMessageEventStream {
   const outer = createAssistantMessageEventStream();
@@ -95,9 +98,17 @@ export function retryFlexStream(
     let started = false;
     let outputStarted = false;
     let retriesPerformed = 0;
+    let tier: "flex" | "default" = "flex";
     try {
       for (;;) {
-        const source = produce();
+        if (options.signal?.aborted) {
+          const cancelled = abortedMessage(options.createError(new Error("Aborted")));
+          invoke(() => options.onTerminal?.("aborted", retriesPerformed));
+          outer.push({ type: "error", reason: "aborted", error: cancelled });
+          outer.end();
+          return;
+        }
+        const source = produce(tier);
         let failed: AssistantMessage | undefined;
         let failureReason: "error" | "aborted" = "error";
 
@@ -124,7 +135,17 @@ export function retryFlexStream(
         failed ??= await source.result();
         if (failureReason === "aborted" || failed.stopReason === "aborted" || options.signal?.aborted) {
           invoke(() => options.onTerminal?.("aborted", retriesPerformed));
-          outer.push({ type: "error", reason: "aborted", error: failed });
+          outer.push({ type: "error", reason: "aborted", error: abortedMessage(failed) });
+          outer.end();
+          return;
+        }
+
+        // Standard fallback gets exactly one attempt; never restart the Flex budget.
+        if (tier === "default") {
+          const terminal: AssistantMessage = { ...failed, stopReason: "error",
+            errorMessage: "Flexy standard-tier fallback failed. Automatic attempts have ended. See /flex audit." };
+          invoke(() => options.onTerminal?.("fallback-failed", retriesPerformed));
+          outer.push({ type: "error", reason: "error", error: terminal });
           outer.end();
           return;
         }
@@ -145,6 +166,11 @@ export function retryFlexStream(
         }
 
         if (retriesPerformed >= maxRetries) {
+          if (options.fallback) {
+            tier = "default";
+            invoke(options.onFallback);
+            continue;
+          }
           const terminal = exhaustedMessage(failed, retriesPerformed + 1);
           invoke(() => options.onTerminal?.("budget-exhausted", retriesPerformed));
           outer.push({ type: "error", reason: "error", error: terminal });
