@@ -1,5 +1,7 @@
 # Flexy
 
+[![npm version](https://img.shields.io/npm/v/%40dowhilegeek%2Fpi-flexy?logo=npm)](https://www.npmjs.com/package/@dowhilegeek/pi-flexy)
+
 Toggle OpenAI Flex in [Pi](https://pi.dev), check whether your last call used it, and see estimated savings.
 
 ## Install
