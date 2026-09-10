@@ -2,7 +2,7 @@ import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 // Pi 0.84's Jiti loader supports this explicit alias, not arbitrary pi-ai/api/* subpaths.
 import { openAIResponsesApi } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { FlexConfig, DEFAULT_PREFERENCES, type Preferences } from "../src/config.ts";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -11,6 +11,7 @@ import {
 import { auditedFetch } from "../src/transport.ts";
 import { capturePricing } from "../src/pricing.ts";
 import { formatSavings, savingsReport } from "../src/savings.ts";
+import { allSavingsReport, formatAllSavings } from "../src/all-savings.ts";
 import { parseFlexRetries, retryFlexStream } from "../src/retry.ts";
 import { ACTIVITY_ENTRY, formatActivity, renderActivity, type Activity, type ActivityDetails } from "../src/activity.ts";
 
@@ -19,8 +20,8 @@ const COMMANDS = [
   { value: "off", description: "Request standard processing (service_tier=default)" },
   { value: "toggle", description: "Switch on/off for this session branch" },
   { value: "status", description: "Show selected mode and active model scope" },
-  { value: "audit", description: "Inspect last AI call; optional --json" },
-  { value: "savings", description: "Estimate last-call and session savings; optional --json" },
+  { value: "audit", description: "Inspect last AI call; optional json" },
+  { value: "savings", description: "Estimate session savings; all scans local sessions; optional json" },
   { value: "history", description: "Show recent calls; optional count 1–50" },
   { value: "fallback", description: "Show/set persistent standard-tier fallback: on|off (standard pricing)" },
   { value: "retries", description: "Show/set Flex stream retries from 0–10" },
@@ -66,6 +67,7 @@ export function configureFlexy(pi: ExtensionAPI, config: FlexConfig): void {
   pi.registerFlag("flex-fallback", { description: "Standard-tier fallback after Flex budget: on|off (standard pricing)", type: "string" });
 
   let active = true;
+  let scanningSavings = false;
   let preferences: Preferences = { ...DEFAULT_PREFERENCES };
   let configError: string | undefined;
   let uiContext: ExtensionContext | undefined;
@@ -289,10 +291,13 @@ export function configureFlexy(pi: ExtensionAPI, config: FlexConfig): void {
 
   async function command(args: string, ctx: ExtensionCommandContext): Promise<void> {
     loadPreferences(ctx);
-    const [raw = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+    const [raw = "status", ...rawArgs] = args.trim().split(/\s+/).filter(Boolean);
     const subcommand = raw.toLowerCase();
+    // Bare arguments are canonical; retain old flag spellings as aliases.
+    const rest = subcommand === "savings" || subcommand === "audit" ? rawArgs.map(arg => arg.replace(/^--/, "")) : rawArgs;
     const valid = COMMANDS.some(c => c.value === subcommand);
-    const validArgs = subcommand === "audit" || subcommand === "savings" ? rest.length === 0 || (rest.length === 1 && rest[0] === "--json")
+    const validArgs = subcommand === "savings" ? rest.every(arg => arg === "all" || arg === "json") && new Set(rest).size === rest.length
+      : subcommand === "audit" ? rest.length === 0 || (rest.length === 1 && rest[0] === "json")
       : subcommand === "history" ? rest.length === 0 || (rest.length === 1 && /^(?:[1-9]|[1-4][0-9]|50)$/.test(rest[0]!))
       : subcommand === "retries" ? rest.length === 0 || (rest.length === 1 && parseFlexRetries(rest[0]) !== undefined)
       : subcommand === "fallback" ? rest.length === 0 || (rest.length === 1 && ["on", "off"].includes(rest[0]!))
@@ -314,10 +319,34 @@ export function configureFlexy(pi: ExtensionAPI, config: FlexConfig): void {
       show(ctx, HELP);
     } else if (subcommand === "audit") {
       const audit = store.last;
-      show(ctx, rest[0] === "--json" ? JSON.stringify({ audit: audit ?? null, verdict: audit ? verdict(audit) : null }, null, 2) : formatAudit(audit));
+      show(ctx, rest[0] === "json" ? JSON.stringify({ audit: audit ?? null, verdict: audit ? verdict(audit) : null }, null, 2) : formatAudit(audit));
     } else if (subcommand === "savings") {
-      const report = savingsReport(ctx.sessionManager.getBranch(), store.records);
-      show(ctx, rest[0] === "--json" ? JSON.stringify(report, null, 2) : formatSavings(report));
+      if (rest.includes("all")) {
+        if (scanningSavings) { show(ctx, "Flex savings scan already running.", "warning"); return; }
+        scanningSavings = true;
+        try {
+          if (ctx.hasUI) ctx.ui.setStatus("flexy-savings", "Scanning local Flex savings…");
+          const sessions = ctx.sessionManager;
+          const sessionFile = sessions.getSessionFile();
+          const roots = [join(dirname(config.path), "sessions")];
+          // Ephemeral SessionManager.getSessionDir() can be cwd, not session storage.
+          if (sessionFile) roots.push(dirname(sessionFile));
+          if (process.env.PI_CODING_AGENT_SESSION_DIR) roots.push(process.env.PI_CODING_AGENT_SESSION_DIR);
+          const report = await allSavingsReport(roots, {
+            id: sessions.getSessionId(), path: sessionFile, createdAt: sessions.getHeader()?.timestamp,
+            entries: sessions.getEntries(), liveRecords: store.records,
+          });
+          show(ctx, rest.includes("json") ? JSON.stringify(report, null, 2) : formatAllSavings(report));
+        } catch (error) {
+          show(ctx, `Flex savings scan failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        } finally {
+          scanningSavings = false;
+          if (active && ctx.hasUI) ctx.ui.setStatus("flexy-savings", undefined);
+        }
+      } else {
+        const report = savingsReport(ctx.sessionManager.getBranch(), store.records);
+        show(ctx, rest.includes("json") ? JSON.stringify(report, null, 2) : formatSavings(report));
+      }
     } else if (subcommand === "history") {
       const records = store.records.slice(-Number(rest[0] ?? 10)).reverse();
       show(ctx, records.length ? ["Flex history — newest first", ...records.map(a => {
@@ -330,11 +359,18 @@ export function configureFlexy(pi: ExtensionAPI, config: FlexConfig): void {
   pi.registerCommand("flex", {
     description: "OpenAI Flex mode, retries, transport audit, savings, and history",
     getArgumentCompletions(prefix) {
-      for (const command of ["audit", "savings"]) {
-        if (prefix.startsWith(`${command} `)) {
-          const value = `${command} --json`;
-          return "--json".startsWith(prefix.slice(command.length + 1)) ? [{ value, label: value }] : null;
-        }
+      for (const command of ["savings", "audit"]) {
+        if (!prefix.startsWith(`${command} `)) continue;
+        const tokens = prefix.slice(command.length + 1).split(/\s+/);
+        const partial = tokens.pop()!;
+        const used = tokens.map(token => token.replace(/^--/, ""));
+        const options = command === "savings" ? ["all", "json"] : ["json"];
+        if (used.some(token => !options.includes(token)) || new Set(used).size !== used.length) return null;
+        const matches = options.filter(option => !used.includes(option))
+          .map(option => partial.startsWith("--") ? `--${option}` : option)
+          .filter(option => option.startsWith(partial))
+          .map(option => { const value = [command, ...tokens, option].join(" "); return { value, label: value }; });
+        return matches.length ? matches : null;
       }
       if (prefix.startsWith("fallback ")) {
         return ["on", "off"].filter(v => v.startsWith(prefix.slice(9))).map(v => ({ value: `fallback ${v}`, label: v }));

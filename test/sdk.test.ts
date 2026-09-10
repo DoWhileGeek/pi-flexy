@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,6 +121,32 @@ test("real Pi loader + startup flag + agent session + reload: commands stay loca
     assert.equal(mixed.session.standardCalls, 1);
     assert.equal(mixed.lastCall.savedUsd, 0);
     assert.ok(Math.abs(mixed.session.savedPercent - 100 / 3) < 1e-6);
+    const archiveDir = join(dir, "sessions", "archived");
+    await mkdir(archiveDir, { recursive: true });
+    const archive = join(archiveDir, "fork.jsonl");
+    const archiveText = [
+      { type: "session", version: 3, id: "archived-fork", timestamp: "2029-01-01T00:00:00.000Z", cwd: dir },
+      ...sessionManager.getEntries(),
+    ].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+    await writeFile(archive, archiveText);
+    const entriesBefore = JSON.stringify(sessionManager.getEntries());
+    const messagesBefore = JSON.stringify(session.messages);
+    await session.prompt("/flex savings all json");
+    const all = JSON.parse(logs.at(-1)!);
+    assert.equal(all.scope, "all-local-sessions-all-branches");
+    assert.equal(all.coverage.sessions, 2);
+    assert.equal(all.coverage.duplicateAuditCopies, 3);
+    assert.equal(all.totals.includedCalls, 3);
+    assert.equal(all.totals.savedUsd, mixed.session.savedUsd);
+    assert.equal(JSON.stringify(sessionManager.getEntries()), entriesBefore, "all-savings command writes no session entries");
+    assert.equal(JSON.stringify(session.messages), messagesBefore, "all-savings command never enters model context");
+    assert.equal(await readFile(archive, "utf8"), archiveText, "archive stays byte-for-byte unchanged");
+    await session.prompt("/flex savings all");
+    assert.match(logs.at(-1)!, /By model:/);
+    assert.doesNotMatch(logs.at(-1)!, /Last AI call/);
+    await session.prompt("/flex savings");
+    assert.doesNotMatch(logs.at(-1)!, /Last AI call/);
+    assert.equal(tiers.length, 3, "global reports never make provider requests");
     assert.deepEqual(errors, []);
   } finally {
     dispose?.();

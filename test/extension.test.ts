@@ -38,7 +38,11 @@ function harness(options: { flex?: boolean; flexRetries?: string; configPath?: s
   const ctx = {
     model: { ...baseModel }, hasUI: true,
     ui: { notify: (text: string, level?: string) => { notices.push(text); noticeLevels.push(level); }, setStatus: (key: string, value: string | undefined) => statuses.set(key, value) },
-    sessionManager: { getBranch: () => entries },
+    sessionManager: {
+      getBranch: () => entries, getEntries: () => entries,
+      getSessionId: () => "harness-session", getSessionFile: () => undefined,
+      getSessionDir: () => join(testDir, "sessions"), getHeader: () => undefined,
+    },
   } as unknown as ExtensionCommandContext;
   const api = {
     on: (name: string, handler: Handler) => handlers.set(name, handler),
@@ -402,11 +406,12 @@ test("HTTP errors and aborted requests do not claim Flex service", async () => {
   assert.equal(verdict(h.lastAudit()).servedAsFlex, "UNKNOWN");
 });
 
-test("savings command reports last call/session, JSON, autocomplete, and is read-only", async () => {
+test("savings command shows session totals without last-call section; JSON remains compatible and read-only", async () => {
   const h = harness();
   await h.emit("session_start");
   await h.command("savings");
-  assert.match(h.notices.at(-1)!, /none observed yet/);
+  assert.match(h.notices.at(-1)!, /totals unknown/);
+  assert.doesNotMatch(h.notices.at(-1)!, /Last AI call/);
   await h.command("savings --bad");
   assert.match(h.notices.at(-1)!, /Invalid/);
   assert.equal((await h.commands.get("flex")!.getArgumentCompletions!("sav"))?.[0]?.value, "savings");
@@ -603,4 +608,55 @@ test("activity persistence/UI failure cannot prevent fallback HTTP request", asy
   assert.equal(requests, 2);
   assert.equal(result.message.stopReason, "stop");
   assert.ok(h.notices.some(n => n.includes("Session activity entry could not be saved")));
+});
+
+test("bare savings arguments and legacy aliases work in either order and remain read-only", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  await h.command("on");
+  await h.run({ fetch: mockFetch() });
+  const before = JSON.stringify(h.entries);
+  await h.command("savings all json");
+  const report = JSON.parse(h.notices.at(-1)!);
+  assert.equal(report.scope, "all-local-sessions-all-branches");
+  assert.equal(report.totals.includedCalls, 1);
+  assert.equal(report.totals.flexCalls, 1);
+  assert.ok(report.totals.savedUsd > 0);
+  for (const args of ["savings json all", "savings --all --json", "savings --json --all", "savings all --json"]) {
+    await h.command(args);
+    assert.deepEqual(JSON.parse(h.notices.at(-1)!).totals, report.totals);
+  }
+  await h.command("savings json");
+  assert.equal(JSON.parse(h.notices.at(-1)!).session.includedCalls, 1);
+  await h.command("audit json");
+  assert.equal(JSON.parse(h.notices.at(-1)!).audit.id, h.lastAudit().id);
+  await h.command("savings all");
+  assert.match(h.notices.at(-1)!, /all local sessions, all branches/);
+  assert.doesNotMatch(h.notices.at(-1)!, /Last AI call/);
+  assert.equal(JSON.stringify(h.entries), before);
+  assert.equal(h.statuses.get("flexy-savings"), undefined);
+  for (const args of ["savings all all", "savings json --json", "savings all --all", "savings all bad", "audit all", "audit json --json", "savings --all --all", "savings --json --json", "savings --all --bad", "audit --all"]) {
+    await h.command(args);
+    assert.match(h.notices.at(-1)!, /Invalid/);
+  }
+  const complete = h.commands.get("flex")!.getArgumentCompletions!;
+  assert.equal((await complete("savings --all --j"))?.[0]?.value, "savings --all --json");
+  assert.deepEqual((await complete("savings "))?.map(c => c.value), ["savings all", "savings json"]);
+  assert.equal((await complete("savings all j"))?.[0]?.value, "savings all json");
+  assert.equal((await complete("savings json a"))?.[0]?.value, "savings json all");
+  assert.equal((await complete("audit j"))?.[0]?.value, "audit json");
+  assert.equal(await complete("savings all all "), null);
+  assert.equal(await complete("savings all json "), null);
+});
+
+test("all-savings avoids ephemeral cwd discovery and rejects concurrent scans", async () => {
+  const h = harness();
+  await h.emit("session_start");
+  h.ctx.sessionManager.getSessionDir = () => { throw new Error("Ephemeral cwd is not session storage"); };
+  const first = h.command("savings --all");
+  await h.command("savings --all");
+  assert.match(h.notices.at(-1)!, /scan already running/);
+  await first;
+  assert.match(h.notices.at(-1)!, /all local sessions/);
+  assert.equal(h.statuses.get("flexy-savings"), undefined);
 });

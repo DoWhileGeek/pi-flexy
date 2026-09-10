@@ -39,7 +39,9 @@ You can also run `/flex on` in an existing session. Send a prompt, then run `/fl
 | `/flex toggle` | Switch Flex on or off |
 | `/flex status` | Show current mode and last-call summary |
 | `/flex audit` | Check whether the last call was sent and served as Flex |
-| `/flex savings` | Show estimated savings for the last call and current session branch |
+| `/flex savings` | Show estimated savings totals for the current session branch |
+| `/flex savings all` | Roll up all locally saved sessions and all branches |
+| `/flex savings all json` | Full rollup with every session/model/day group and scan warnings |
 | `/flex history` | Show recent calls |
 | `/flex retries` | Show retry budget |
 | `/flex retries N` | Save global retry budget, from 0–10 |
@@ -50,6 +52,24 @@ You can also run `/flex on` in an existing session. Send a prompt, then run `/fl
 The footer shows `💪 flex:on` or `💪 flex:off`. New sessions start with Flex off unless launched with `--flex`.
 
 Both `--flex` and `/flex on` affect only models using Pi's native `openai` provider and `openai-responses` API. With Codex subscriptions or other providers, Flexy shows `flex:on (inactive)` and leaves requests untouched.
+
+## Savings across sessions
+
+`/flex savings` shows current-branch totals and coverage, without a last-call section. `/flex savings json` retains its existing machine-readable schema, including `lastCall`, for compatibility. Use `/flex audit json` for a machine-readable last-call audit. The old `--all` and `--json` spellings still work as aliases.
+
+Use `/flex savings all` for lifetime estimates across **locally retained** sessions. It scans `~/.pi/agent/sessions` (or `$PI_CODING_AGENT_DIR/sessions`), the current session's storage directory, and `$PI_CODING_AGENT_SESSION_DIR` when set. It includes inactive branches and current in-memory entries, not just the last 50 audits. Archives in unrelated custom directories and deleted histories cannot be discovered automatically.
+
+The report shows:
+
+- Estimated spend, equivalent standard-price cost for the same token/cache usage, and savings.
+- Breakdown by model (dollars and percentage saved), top 10 sessions by savings, and latest 10 UTC call-start dates. Model percentages are savings divided by equivalent standard-price cost across that model's included Flex and standard calls—not an average of per-call percentages. `all json` includes every group; argument order does not matter.
+- Included/excluded calls, unaudited histories, deduplicated copies, and scan warnings.
+
+Repeated audit snapshots and copied fork histories do **not** count as new spending. Calls deduplicate by audit ID and provider/API response ID. A call belongs to its earliest retained session copy for the session breakdown. Contradictory evidence or ambiguous identities are excluded rather than inflating totals. Historical audits can use matching saved Pi costs; today's model catalog prices are never substituted for missing historical prices. Standard-tier fallback contributes zero Flex savings.
+
+Scanning is read-only: no session migration, file writes, API requests, or automatic caching. Each file is read only up to its size when opened. Unterminated tails are deferred, corrupt/oversized records are skipped with warnings, and symlinks are not followed. Only accounting metadata is retained by the scanner; transcript content is not included in the report or sent to a model. Empty or unpriceable histories report **unknown**, not zero.
+
+These remain estimates for completed responses, not invoice totals. Failed-attempt charges, unaudited tool/summary work, taxes, and account-specific adjustments are excluded. Active sessions can change during the scan; run the command again to refresh.
 
 ## Retries and standard-tier fallback
 

@@ -92,8 +92,8 @@ function messageKey(provider: unknown, api: unknown, model: unknown, timestamp: 
   return JSON.stringify([provider, api, model, timestamp]);
 }
 
-/** Reconstruct all branch audits (not just the 50-call UI window). Read-only. */
-export function savingsReport(entries: readonly Entry[], liveRecords: readonly Audit[] = []): SavingsReport {
+/** Reconstruct audits and legacy usage within one session only. Read-only. */
+export function resolveSavingsAudits(entries: readonly Entry[], liveRecords: readonly Audit[] = []): { audits: Audit[]; unmatchedAssistantMessages: number } {
   const audits = new Map<string, Audit>();
   const messages = new Map<string, Array<{ index: number; responseId: unknown; usage?: UsageSnapshot }>>();
   let assistantMessages = 0;
@@ -131,7 +131,13 @@ export function savingsReport(entries: readonly Entry[], liveRecords: readonly A
     matched.add(candidate.index);
     if (!audit.usage && audit.pricing === undefined) audit.usage = candidate.usage;
   }
-  const results = [...audits.values()].map(estimateSavings);
+  return { audits: [...audits.values()], unmatchedAssistantMessages: assistantMessages - matched.size };
+}
+
+/** Reconstruct all branch audits (not just the 50-call UI window). Read-only. */
+export function savingsReport(entries: readonly Entry[], liveRecords: readonly Audit[] = []): SavingsReport {
+  const { audits, unmatchedAssistantMessages } = resolveSavingsAudits(entries, liveRecords);
+  const results = audits.map(estimateSavings);
   const included = results.filter((result): result is EstimatedSavings => result.status === "estimated");
   const exclusions: SavingsReport["session"]["exclusions"] = {};
   for (const result of results) {
@@ -141,7 +147,7 @@ export function savingsReport(entries: readonly Entry[], liveRecords: readonly A
   const piUsd = included.reduce((sum, call) => sum + call.piCost.total, 0);
   const savedUsd = included.reduce((sum, call) => sum + call.savedUsd, 0);
   const totalsAvailable = included.length > 0 && [standardUsd, piUsd, savedUsd].every(Number.isFinite);
-  const lastId = liveRecords.at(-1)?.id ?? [...audits.keys()].at(-1);
+  const lastId = liveRecords.at(-1)?.id ?? audits.at(-1)?.id;
   return {
     version: 1, currency: "USD", basis: "completed-responses-only",
     lastCall: results.find(call => call.id === lastId) ?? null,
@@ -151,7 +157,7 @@ export function savingsReport(entries: readonly Entry[], liveRecords: readonly A
       flexCalls: included.filter(call => call.servedTier === "flex").length,
       standardCalls: included.filter(call => call.servedTier === "default").length,
       historicalCalls: included.filter(call => call.source === "saved-pi-cost").length,
-      unmatchedAssistantMessages: assistantMessages - matched.size,
+      unmatchedAssistantMessages,
       excludedCalls: results.length - included.length, exclusions,
       standardUsd: totalsAvailable ? standardUsd : null,
       piUsd: totalsAvailable ? piUsd : null,
@@ -173,21 +179,6 @@ function amounts(standard: number, pi: number, saved: number, percent: number): 
 }
 export function formatSavings(report: SavingsReport): string {
   const lines = ["Flex savings — estimates (USD)"];
-  const last = report.lastCall;
-  if (!last) lines.push("Last AI call: none observed yet.");
-  else {
-    lines.push(`Last AI call: ${last.model.provider}/${last.model.id} (${last.id})`);
-    if (last.status === "unavailable") lines.push(`  Estimate unavailable: ${EXCLUSIONS[last.reason]}.`);
-    else {
-      lines.push(`  Served tier: ${last.servedTier}`);
-      lines.push(...amounts(last.standardCost.total, last.piCost.total, last.savedUsd, last.savedPercent));
-      lines.push(`  Tokens: input ${last.usage.input.toLocaleString("en-US")}, cache read ${last.usage.cacheRead.toLocaleString("en-US")}, cache write ${last.usage.cacheWrite.toLocaleString("en-US")}, output ${last.usage.output.toLocaleString("en-US")}`);
-      if (last.usage.reasoning) lines.push(`  Reasoning: ${last.usage.reasoning.toLocaleString("en-US")} tokens, already included in output.`);
-      lines.push(last.source === "request-time-prices"
-        ? `  Basis: Pi model prices snapshotted ${last.pricingCapturedAt}.`
-        : "  Basis: matched saved Pi cost; standard baseline reconstructed using Pi's Flex multiplier.");
-    }
-  }
   const session = report.session;
   lines.push(`Session branch: ${session.includedCalls} priced completed responses (${session.flexCalls} Flex, ${session.standardCalls} standard)`);
   if (session.standardUsd !== null && session.piUsd !== null && session.savedUsd !== null && session.savedPercent !== null) {

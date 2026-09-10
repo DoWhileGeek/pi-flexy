@@ -46,7 +46,8 @@ test("same sample usage: standard $1.36458, Pi Flex $0.68229, saved $0.68229; no
   assert.deepEqual(audit, before, "pricing must not mutate Pi usage or audit metadata");
   const text = formatSavings(savingsReport([auditEntry(audit)]));
   assert.match(text, /\$0.682290 \(50.0%\)/);
-  assert.match(text, /Reasoning: 176 tokens, already included in output/);
+  assert.doesNotMatch(text, /Last AI call|Served tier:|Tokens:|Reasoning:|Basis:/);
+  assert.match(text, /Session branch:/);
   assert.match(text, /Estimates, not billing/);
 });
 
@@ -209,7 +210,8 @@ test("session totals span more than 50 calls, survive restore, and follow active
 test("empty/excluded totals are unknown; mixed Flex/default percentages are weighted", () => {
   const empty = savingsReport([]);
   assert.equal(empty.session.savedUsd, null);
-  assert.match(formatSavings(empty), /none observed yet/);
+  assert.match(formatSavings(empty), /totals unknown/);
+  assert.doesNotMatch(formatSavings(empty), /Last AI call/);
   const flex = call("flex_call");
   const standard = call("standard_call");
   standard.attempts[0]!.responseTier = "default";
