@@ -90,7 +90,7 @@ That sequence permits **Flex → Flex → Flex → default**. For an immediate s
 
 **Fallback uses standard pricing.** It changes only the failed provider call, not your session's Flex mode. The next new model call starts on Flex again. Fallback gets exactly one attempt; if it fails, Flexy stops rather than returning to Flex or allowing Pi to add more retries. Managed Flex calls disable SDK-level retries so HTTP retries cannot multiply this budget. Standard-mode calls keep their normal Pi behavior.
 
-Retries use a detached snapshot of the final post-hook JSON payload. Fallback changes only `service_tier` to `default`; it does not rerun payload hooks or include queued input. `/flex audit` records each HTTP attempt, the retry budget, and whether fallback was used. A successful default-tier response contributes no Flex savings.
+Retries use a detached snapshot of the final post-hook JSON payload. Fallback changes only `service_tier` to `default`; it does not rerun payload hooks or include queued input. `/flex audit` records each HTTP attempt, the retry budget, whether fallback was used, and bounded provider rejection details (`code`, `type`, `param`, `reason`, and `message`) before a retry can hide them. Adapter-level stream errors are retained per attempt when no structured provider error exists. Messages are capped at 32,768 characters and other error fields at 1,024 characters, with truncation reported. A successful default-tier response contributes no Flex savings.
 
 ### Session activity
 
@@ -106,7 +106,7 @@ Requesting default tier at standard pricing for this call only. Session Flex mod
 
 The fallback notice uses warning coloring and is recorded when the default-tier request reaches the HTTP transport. It reports requested pricing, not a billing confirmation; `/flex audit` shows the response-tier evidence. Cancelling before that handoff does not produce a fallback marker.
 
-Entries retain their original UTC timestamps across resume and reload. Expand an entry to see its audit call ID. The footer also shows retry/backoff or the current standard-tier fallback while active. These are custom session entries, never model messages: they do not steer the agent, trigger extra turns, or enter prompts/compaction context. No prompts, generated output, or raw provider errors are stored in activity entries. Print mode writes the same activity text to stderr; JSON/RPC clients receive native `entry_appended` events.
+Entries retain their original UTC timestamps across resume and reload. Expand an entry to see its audit call ID. The footer also shows retry/backoff or the current standard-tier fallback while active. These are custom session entries, never model messages: they do not steer the agent, trigger extra turns, or enter prompts/compaction context. Activity entries store no prompts, generated output, or provider errors; bounded provider rejection fields live only in the corresponding audit entry and `/flex audit` output. Print mode writes the same activity text to stderr; JSON/RPC clients receive native `entry_appended` events.
 
 ### Preferences across sessions
 

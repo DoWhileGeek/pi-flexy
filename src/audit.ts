@@ -6,10 +6,21 @@ export const STATE_ENTRY = "flexy:state";
 export const AUDIT_ENTRY = "flexy:audit";
 export const HISTORY_LIMIT = 50;
 export const ATTEMPT_LIMIT = 20;
+export const PROVIDER_ERROR_MESSAGE_LIMIT = 32 * 1024;
+export const PROVIDER_ERROR_FIELD_LIMIT = 1024;
 export type Mode = "on" | "off";
 export type Tier = "flex" | "default" | "auto" | "priority" | "scale" | "omitted" | "unknown";
 export type Outcome = "pending" | "complete" | "error" | "aborted" | "interrupted";
 export interface ModelIdentity { provider: string; id: string; api: string }
+export interface ProviderError {
+  eventType: "error" | "response.failed" | "http.error";
+  code?: string | null;
+  type?: string | null;
+  param?: string | null;
+  reason?: string | null;
+  message?: string | null;
+  truncated?: boolean;
+}
 export interface Attempt {
   number: number;
   startedAt: string;
@@ -20,6 +31,9 @@ export interface Attempt {
   responseId?: string;
   responseTier?: Tier;
   terminalResponse?: boolean;
+  providerError?: ProviderError;
+  errorMessage?: string;
+  errorMessageTruncated?: boolean;
   networkError?: boolean;
   inspectionLimited?: boolean;
 }
@@ -83,8 +97,34 @@ export function safeId(value: unknown): string | undefined {
 export function safeOrigin(value: string): string | undefined {
   try { return new URL(value).origin; } catch { return undefined; }
 }
+export function boundedText(value: unknown, limit: number): { value?: string; truncated: boolean } {
+  if (typeof value !== "string") return { truncated: false };
+  return { value: value.slice(0, limit), truncated: value.length > limit };
+}
+function boundedNullableText(value: unknown, limit: number): { value?: string | null; truncated: boolean } {
+  if (value === null) return { value: null, truncated: false };
+  return boundedText(value, limit);
+}
+function decodeProviderError(value: unknown): ProviderError | undefined {
+  if (!isRecord(value) || !["error", "response.failed", "http.error"].includes(String(value.eventType))) return undefined;
+  const code = boundedNullableText(value.code, PROVIDER_ERROR_FIELD_LIMIT);
+  const type = boundedNullableText(value.type, PROVIDER_ERROR_FIELD_LIMIT);
+  const param = boundedNullableText(value.param, PROVIDER_ERROR_FIELD_LIMIT);
+  const reason = boundedNullableText(value.reason, PROVIDER_ERROR_FIELD_LIMIT);
+  const message = boundedNullableText(value.message, PROVIDER_ERROR_MESSAGE_LIMIT);
+  return {
+    eventType: value.eventType as ProviderError["eventType"],
+    ...(code.value !== undefined ? { code: code.value } : {}),
+    ...(type.value !== undefined ? { type: type.value } : {}),
+    ...(param.value !== undefined ? { param: param.value } : {}),
+    ...(reason.value !== undefined ? { reason: reason.value } : {}),
+    ...(message.value !== undefined ? { message: message.value } : {}),
+    ...(value.truncated === true || code.truncated || type.truncated || param.truncated || reason.truncated || message.truncated
+      ? { truncated: true } : {}),
+  };
+}
 
-// Session data is untrusted. Reconstruct only the documented, bounded metadata fields.
+// Session data is untrusted. Reconstruct only documented, bounded audit fields.
 export function decodeAudit(data: unknown): Audit | undefined {
   if (!isRecord(data) || data.version !== 1 || !safeId(data.id) || typeof data.startedAt !== "string" ||
       !Number.isFinite(Date.parse(data.startedAt)) || !isRecord(data.model) ||
@@ -98,6 +138,7 @@ export function decodeAudit(data: unknown): Audit | undefined {
   for (const raw of data.attempts.slice(-ATTEMPT_LIMIT)) {
     if (!isRecord(raw) || typeof raw.number !== "number" || !Number.isSafeInteger(raw.number) || raw.number < 1 ||
         typeof raw.startedAt !== "string" || !Number.isFinite(Date.parse(raw.startedAt))) return undefined;
+    const errorMessage = boundedText(raw.errorMessage, PROVIDER_ERROR_MESSAGE_LIMIT);
     attempts.push({
       number: raw.number, startedAt: raw.startedAt, sentTier: savedTier(raw.sentTier),
       origin: typeof raw.origin === "string" ? safeOrigin(raw.origin) : undefined,
@@ -105,6 +146,9 @@ export function decodeAudit(data: unknown): Audit | undefined {
       requestId: safeId(raw.requestId), responseId: safeId(raw.responseId),
       responseTier: raw.responseTier === undefined ? undefined : savedTier(raw.responseTier),
       terminalResponse: raw.terminalResponse === true,
+      providerError: decodeProviderError(raw.providerError),
+      errorMessage: errorMessage.value,
+      errorMessageTruncated: raw.errorMessageTruncated === true || errorMessage.truncated,
       networkError: raw.networkError === true,
       inspectionLimited: raw.inspectionLimited === true,
     });
@@ -254,6 +298,15 @@ export function formatAudit(audit: Audit | undefined): string {
     if (attempt.origin) lines.push(`  Origin: ${attempt.origin}`);
     if (attempt.requestId) lines.push(`  Request ID: ${attempt.requestId}`);
     if (attempt.responseId) lines.push(`  Response ID: ${attempt.responseId}`);
+    if (attempt.providerError) {
+      const error = attempt.providerError;
+      const fields = ["code", "type", "param", "reason"].flatMap(key =>
+        key in error ? [`${key}=${JSON.stringify(error[key as keyof ProviderError])}`] : []);
+      lines.push(`  Provider error [${error.eventType}]${fields.length ? `: ${fields.join(", ")}` : ""}`);
+      if ("message" in error) lines.push(`    Message: ${JSON.stringify(error.message)}`);
+      if (error.truncated) lines.push("    Provider error fields truncated to audit limits.");
+    }
+    if (attempt.errorMessage) lines.push(`  Stream error: ${JSON.stringify(attempt.errorMessage)}${attempt.errorMessageTruncated ? " (truncated)" : ""}`);
     if (attempt.inspectionLimited) lines.push("  Response inspection limit reached; some evidence unavailable.");
   }
   if (audit.attemptCount > audit.attempts.length) lines.push(`Showing last ${audit.attempts.length} of ${audit.attemptCount} transport attempts.`);

@@ -19,6 +19,7 @@ export type FlexRetryTerminalReason =
 
 export interface FlexRetryCallbacks {
   onFallback?: () => void;
+  onAttemptFailure?: (message: AssistantMessage, attempt: number, tier: "flex" | "default") => void;
   onRetryScheduled?: (attempt: number, maxRetries: number, delayMs: number) => void;
   onRetryStart?: (attempt: number, maxRetries: number) => void;
   onTerminal?: (reason: FlexRetryTerminalReason, retriesPerformed: number) => void;
@@ -98,9 +99,11 @@ export function retryFlexStream(
     let started = false;
     let outputStarted = false;
     let retriesPerformed = 0;
+    let attemptNumber = 0;
     let tier: "flex" | "default" = "flex";
     try {
       for (;;) {
+        attemptNumber++;
         if (options.signal?.aborted) {
           const cancelled = abortedMessage(options.createError(new Error("Aborted")));
           invoke(() => options.onTerminal?.("aborted", retriesPerformed));
@@ -133,6 +136,9 @@ export function retryFlexStream(
         }
 
         failed ??= await source.result();
+        if (failureReason !== "aborted" && failed.stopReason === "error") {
+          invoke(() => options.onAttemptFailure?.(failed, attemptNumber, tier));
+        }
         if (failureReason === "aborted" || failed.stopReason === "aborted" || options.signal?.aborted) {
           invoke(() => options.onTerminal?.("aborted", retriesPerformed));
           outer.push({ type: "error", reason: "aborted", error: abortedMessage(failed) });
