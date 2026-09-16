@@ -80,7 +80,9 @@ export function configureFlexy(pi: ExtensionAPI, config: FlexConfig): void {
 
   function updateStatus(ctx: ExtensionContext): void {
     uiContext = ctx;
-    if (ctx.hasUI) ctx.ui.setStatus("flexy", `💪 flex:${store.mode}${managed(ctx.model) ? "" : " (inactive)"}`);
+    // A model Flexy cannot manage has no Flex state to report; clear the line instead of
+    // claiming an inactive Flex mode that never applies to its requests.
+    if (ctx.hasUI) ctx.ui.setStatus("flexy", managed(ctx.model) ? `💪 flex:${store.mode}` : undefined);
   }
   function recordActivity(audit: Audit, details: ActivityDetails, at = new Date().toISOString()): void {
     if (!active || !store.contains(audit)) return;

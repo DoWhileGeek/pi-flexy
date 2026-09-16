@@ -53,7 +53,7 @@ You can also run `/flex on` in an existing session. Send a prompt, then run `/fl
 
 The footer shows `💪 flex:on` or `💪 flex:off`. New sessions start with Flex off unless launched with `--flex`.
 
-Both `--flex` and `/flex on` affect only models using Pi's native `openai` provider and `openai-responses` API. With Codex subscriptions or other providers, Flexy shows `flex:on (inactive)` and leaves requests untouched.
+Both `--flex` and `/flex on` affect only models using Pi's native `openai` provider and `openai-responses` API. For a Codex subscription or any other provider, Flexy renders no status line at all and leaves requests untouched; `/flex status` and `/flex audit` still name the active model and why it is out of scope.
 
 ## Savings across sessions
 
