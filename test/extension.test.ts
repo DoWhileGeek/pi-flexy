@@ -188,12 +188,17 @@ test("CLI flags enable Flex and configure retries before first managed call", as
   const inactive = harness({ flex: true });
   inactive.ctx.model = { ...baseModel, provider: "openai-codex", api: "openai-codex-responses" };
   await inactive.emit("session_start");
-  assert.equal(inactive.statuses.get("flexy"), "💪 flex:on (inactive)");
+  assert.equal(inactive.statuses.get("flexy"), undefined, "out-of-scope model renders no Flex status line");
   assert.equal(inactive.noticeLevels.at(-1), "warning");
   assert.match(inactive.notices.at(-1)!, /Codex subscription/);
   const payload = { model: "gpt-5.4" };
   assert.equal(await inactive.emit("before_provider_request", { payload }), payload);
   assert.equal("service_tier" in payload, false);
+  await inactive.command("on");
+  assert.equal(inactive.statuses.get("flexy"), undefined, "explicit mode change cannot revive a status line for an out-of-scope model");
+  inactive.ctx.model = { ...baseModel };
+  await inactive.emit("model_select");
+  assert.equal(inactive.statuses.get("flexy"), "💪 flex:on", "status returns when a managed model is selected");
 });
 
 test("native SDK hits local HTTP server: on/off wire tiers, request ID, no stream regression", async () => {
@@ -386,7 +391,7 @@ test("other providers stay untouched and replace last managed audit", async () =
   await h.command("audit");
   assert.match(h.notices.at(-1)!, /Codex subscription/);
   assert.equal(h.lastAudit().model.provider, "openai-codex");
-  assert.equal(h.statuses.get("flexy"), "💪 flex:on (inactive)");
+  assert.equal(h.statuses.get("flexy"), undefined);
 });
 
 test("overridden transport falls back to honest payload-only evidence", async () => {
