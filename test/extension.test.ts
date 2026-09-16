@@ -305,7 +305,17 @@ test("Flex stream capacity retry freezes payload and hides failed attempt from P
   assert.equal(result.events.includes("error"), false);
   assert.deepEqual(h.lastAudit().flexRetry, { limit: 1, performed: 1, terminalReason: "success" });
   assert.deepEqual(h.lastAudit().attempts.map(a => [a.sentTier, a.status]), [["flex", 200], ["flex", 200]]);
+  assert.deepEqual(h.lastAudit().attempts[0]?.providerError, {
+    eventType: "response.failed", code: "server_error",
+    message: "We're currently processing too many requests — please try again later.",
+  });
+  assert.equal(h.lastAudit().attempts[0]?.errorMessage, undefined);
   assert.equal(verdict(h.lastAudit()).servedAsFlex, "YES");
+  await h.command("audit json");
+  assert.deepEqual(JSON.parse(h.notices.at(-1)!).audit.attempts[0].providerError, {
+    eventType: "response.failed", code: "server_error",
+    message: "We're currently processing too many requests — please try again later.",
+  });
   assert.equal(h.statuses.get("flexy"), "💪 flex:on");
 });
 
@@ -325,8 +335,11 @@ test("Flex retry exhaustion is final for Pi and never falls back to default", as
   assert.match(result.message.errorMessage!, /1 total stream attempt/);
   assert.equal(isRetryableAssistantError(result.message), false);
   assert.deepEqual(h.lastAudit().flexRetry, { limit: 0, performed: 0, terminalReason: "budget-exhausted" });
+  assert.equal(h.lastAudit().attempts[0]?.providerError?.code, "server_error");
+  assert.equal(h.lastAudit().attempts[0]?.errorMessage, undefined);
   await h.command("audit");
   assert.match(h.notices.at(-1)!, /terminal: budget-exhausted/);
+  assert.match(h.notices.at(-1)!, /Provider error \[response.failed\]/);
 });
 
 test("managed retries replace SDK retries; every HTTP attempt is counted", async () => {
@@ -564,6 +577,8 @@ test("cancelled backoff renders scheduled retry only; no false fallback pricing 
   } });
   assert.equal(result.message.stopReason, "aborted");
   assert.equal(requests, 1);
+  assert.equal(h.lastAudit().attempts[0]?.providerError?.code, "server_error");
+  assert.equal(h.lastAudit().attempts[0]?.errorMessage, undefined);
   assert.deepEqual(h.entries.filter(e => e.customType === ACTIVITY_ENTRY).map(e => decodeActivity(e.data)?.kind), ["retry-scheduled"]);
   assert.equal(h.statuses.get("flexy"), "💪 flex:on");
 });

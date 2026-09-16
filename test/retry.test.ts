@@ -65,10 +65,12 @@ test("zero-output transient failures retry inside one stream without leaking fai
   const scheduled: number[] = [];
   const started: number[] = [];
   const terminal: string[] = [];
+  const failures: Array<[number, string, string | undefined]> = [];
   const stream = retryFlexStream(() => ++calls < 3 ? failed() : succeeded(), {
     maxRetries: 2,
     baseDelayMs: 0,
     createError: internalError,
+    onAttemptFailure: (failure, attempt, tier) => failures.push([attempt, tier, failure.errorMessage]),
     onRetryScheduled: attempt => scheduled.push(attempt),
     onRetryStart: attempt => started.push(attempt),
     onTerminal: reason => terminal.push(reason),
@@ -78,6 +80,10 @@ test("zero-output transient failures retry inside one stream without leaking fai
   assert.deepEqual(scheduled, [1, 2]);
   assert.deepEqual(started, [1, 2]);
   assert.deepEqual(terminal, ["success"]);
+  assert.deepEqual(failures, [
+    [1, "flex", "We're currently processing too many requests — please try again later."],
+    [2, "flex", "We're currently processing too many requests — please try again later."],
+  ]);
   assert.equal(events.filter(event => event.type === "start").length, 1);
   assert.equal(events.filter(event => event.type === "error").length, 0);
   assert.equal(events.filter(event => event.type === "done").length, 1);

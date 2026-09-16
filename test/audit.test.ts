@@ -158,6 +158,35 @@ test("malformed persisted entries ignored; extra data stripped; history bounded"
   assert.equal(JSON.stringify(decoded).includes("secret"), false);
 });
 
+test("provider rejection data decodes safely, stays bounded, and appears in audits", () => {
+  const { store } = fixture();
+  const call = store.begin(model, "transport");
+  call.attemptCount = 1;
+  call.attempts = [{
+    number: 1, startedAt: call.startedAt, sentTier: "flex", status: 200,
+    providerError: {
+      eventType: "error", code: "flex_capacity_exceeded", type: "server_error", param: null,
+      message: "Please retry your request.",
+    },
+    errorMessage: "Error Code flex_capacity_exceeded: Please retry your request.",
+  }];
+  const decoded = decodeAudit(JSON.parse(JSON.stringify(call)))!;
+  assert.deepEqual(decoded.attempts[0]?.providerError, call.attempts[0]?.providerError);
+  assert.equal(decoded.attempts[0]?.errorMessage, call.attempts[0]?.errorMessage);
+  assert.match(formatAudit(decoded), /flex_capacity_exceeded/);
+  assert.match(formatAudit(decoded), /Please retry your request/);
+
+  const oversized = "x".repeat(40_000);
+  const bounded = decodeAudit({
+    ...call,
+    attempts: [{ ...call.attempts[0], providerError: { eventType: "error", message: oversized }, errorMessage: oversized }],
+  })!;
+  assert.equal(bounded.attempts[0]?.providerError?.message?.length, 32 * 1024);
+  assert.equal(bounded.attempts[0]?.providerError?.truncated, true);
+  assert.equal(bounded.attempts[0]?.errorMessage?.length, 32 * 1024);
+  assert.equal(bounded.attempts[0]?.errorMessageTruncated, true);
+});
+
 test("Flex retry audit metadata decodes safely and formats exhaustion", () => {
   const { store } = fixture();
   const call = store.begin(model, "transport");

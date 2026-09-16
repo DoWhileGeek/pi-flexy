@@ -6,7 +6,8 @@ import { dirname, join } from "node:path";
 import { FlexConfig, DEFAULT_PREFERENCES, type Preferences } from "../src/config.ts";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-  AuditStore, type Audit, formatAudit, identity, isRecord, managed, scopeReason, tierOf, verdict,
+  AuditStore, PROVIDER_ERROR_MESSAGE_LIMIT, type Audit, boundedText, formatAudit, identity, isRecord, managed,
+  scopeReason, tierOf, verdict,
 } from "../src/audit.ts";
 import { auditedFetch } from "../src/transport.ts";
 import { capturePricing } from "../src/pricing.ts";
@@ -194,6 +195,16 @@ export function configureFlexy(pi: ExtensionAPI, config: FlexConfig): void {
           store.persist(audit);
         },
         createError: () => internalError(requestModel, options?.signal?.aborted === true),
+        onAttemptFailure: (message, attemptNumber) => {
+          const attempt = audit.attempts.find(candidate => candidate.number === attemptNumber);
+          if (!attempt) return;
+          if (typeof attempt.providerError?.message !== "string") {
+            const errorMessage = boundedText(message.errorMessage, PROVIDER_ERROR_MESSAGE_LIMIT);
+            attempt.errorMessage = errorMessage.value;
+            attempt.errorMessageTruncated = errorMessage.truncated;
+          }
+          store.persist(audit);
+        },
         onRetryScheduled: (attempt, maxRetries, delayMs) => {
           recordActivity(audit, { kind: "retry-scheduled", retry: attempt, limit: maxRetries, delayMs });
           if (active && store.contains(audit) && uiContext?.hasUI) uiContext.ui.setStatus("flexy", `💪 flex:${store.mode} | retry ${attempt}/${maxRetries} in ${delayMs / 1000}s`);
